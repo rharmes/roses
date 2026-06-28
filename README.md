@@ -1,2 +1,2 @@
 # roses
-A TUI RSS reader, syncing through Feedbin
+A TUI RSS reader, backed by Feedbin.
