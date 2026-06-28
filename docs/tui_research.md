@@ -429,6 +429,118 @@ maintain" hardest, and it would be a perfectly defensible choice.
 
 ---
 
+## 6. Rust and Go as languages — a programmer's view
+
+Rust and Go are the two finalists, so they deserve a portrait at the language level — not "which has the
+better RSS crate," but what each is actually *like* to write, where its ecosystem stands in 2026, and where
+it's headed. They were designed in opposite directions and that shows in every line you write.
+
+The one-sentence framing: **Rust maximizes control and correctness, and charges you complexity for it;
+Go maximizes simplicity and velocity, and charges you expressiveness for it.**
+
+### 6.1 Rust
+
+**The pitch.** A systems language that gives you C/C++-level performance and control with *compile-time
+memory safety and no garbage collector*. Its defining idea — **ownership and borrowing** — lets the compiler
+prove, statically, that you never have a use-after-free, double-free, or data race, without a runtime to
+police it. The slogan "fearless concurrency" is the payoff: if it compiles, a whole class of bugs is
+provably absent.
+
+**The type system is the point.** Coming from TypeScript, Rust will feel like the type system you reach for
+in TS made mandatory and far stronger:
+
+- **Algebraic data types.** `enum`s are real tagged unions (`enum Screen { FeedList, Reading(EntryId), Help }`),
+  and `match` is *exhaustive* — add a variant and the compiler lists every place you forgot to handle it.
+  This is the single feature that makes Rust so good at modeling state machines (exactly a TUI's job).
+- **No null.** Absence is `Option<T>`; you can't accidentally deref nothing.
+- **Errors are values.** `Result<T, E>` plus the `?` operator give clean, explicit error propagation with no
+  exceptions and no hidden control flow.
+- **Traits** (≈ interfaces / typeclasses) drive generics and polymorphism; **lifetimes** are the annotations
+  that let the borrow checker reason about references.
+
+**The catch is also the type system / memory model.** Ownership, borrowing, and lifetimes are a genuinely new
+mental model — there's a well-known "fighting the borrow checker" phase, and `async` adds its own complexity
+(`Send`/`Sync`, pinning, executor choice). Compile times are slow, so the edit→build→run loop drags compared
+to Go or a scripting language.
+
+**Tooling (a real strength).** `cargo` is widely considered a best-in-class build tool + package manager:
+one command for build/test/bench/docs, a single manifest, and [crates.io](https://crates.io) for dependencies.
+`rustup` manages toolchains/targets, `clippy` lints aggressively, `rustfmt` formats, and `rust-analyzer` gives
+excellent editor support. The compiler's error messages are famously good — they often tell you the fix.
+
+**Ecosystem (2026).** Mature and still growing fast. Stable since **1.0 in 2015**, evolving through *editions*
+(2015/2018/2021/**2024**, the 2024 edition now current) so the language can advance without breaking old code;
+point releases ship every six weeks. Rust has crossed from "promising" to "load-bearing infrastructure": it's
+**in the Linux kernel**, in Android and Windows components, at AWS (Firecracker), Cloudflare, Discord, Dropbox,
+and Microsoft, and it's a top choice for CLI tools, WebAssembly, and embedded. The library ecosystem for this
+project is excellent (see §3.1); the main gaps are in younger niches, not anything roses touches.
+
+**Long-term prospects.** Strong. Governance sits with the vendor-neutral **Rust Foundation** (AWS, Google,
+Microsoft, Meta, and others), so it isn't dependent on one company. It has topped "most admired language"
+surveys for the better part of a decade, and the industry/government push toward **memory-safe languages**
+(CISA and others naming C/C++ a liability) is a structural tailwind. The realistic risk isn't disappearance —
+it's that Rust stays a high-skill, deliberately-adopted language rather than a default, so hiring and ramp-up
+remain costlier than for mainstream languages.
+
+### 6.2 Go
+
+**The pitch.** A language built at Google to make large teams productive on networked services and tooling, with
+**simplicity as the explicit goal**. The bet is that a small, boring language with fast compiles, one obvious way
+to do things, and great built-in tooling beats a powerful-but-complex one at scale. You can read essentially all
+of Go in a weekend, and most Go code looks the same — by design.
+
+**The feel.** Static types, but deliberately minimal:
+
+- **Goroutines and channels** are the signature feature: lightweight concurrency (CSP-style) where you spawn
+  thousands of `goroutine`s and coordinate over `channel`s. Concurrency that's awkward elsewhere is idiomatic and
+  approachable here — the best-in-class story of any mainstream language.
+- **Structural interfaces.** A type satisfies an interface just by having the methods — no `implements` keyword.
+  This feels natural to a TS developer used to structural typing.
+- **Explicit errors.** No exceptions; functions return an `error` you check with `if err != nil { ... }`. Verbose
+  and repetitive, but utterly predictable — control flow is always on the page. (`panic`/`recover` exist for
+  truly exceptional cases.) An attempt to add lighter error-handling syntax was explored and ultimately *dropped*
+  — a window into Go's "resist features" culture.
+- **Composition over inheritance.** Structs + methods + embedding; no classes, no inheritance hierarchies.
+- **Generics** arrived in **1.18 (2022)** — useful, intentionally limited.
+
+**The notable gap.** Go has **no sum types / enums and no exhaustive matching**. Modeling a "this is exactly one
+of these N states" — a TUI's bread and butter — is done with interfaces, type switches, or integer constants, none
+of which the compiler checks for completeness. This is precisely where Rust's `enum`/`match` shines, and it's the
+clearest expressiveness cost of Go's minimalism for an app like roses. `nil` is also a real footgun (nil pointers,
+nil interfaces).
+
+**Tooling (also a real strength).** The `go` command is batteries-included: build, test, benchmark, format
+(`gofmt` — non-negotiable, ends all style debates), vet, modules, a built-in **race detector**, and profiling
+(`pprof`). **Compilation is famously fast**, which keeps iteration tight. `gopls` powers editor support.
+
+**Ecosystem (2026).** Very mature and rock-stable. Released 2009, **1.0 in 2012**, now in the **1.26 era**
+(early 2026), and governed by the **Go 1 compatibility promise** — code written years ago still builds, which
+makes Go unusually low-maintenance over time. Go *owns* cloud-native and DevOps infrastructure: **Docker,
+Kubernetes, Terraform, Prometheus, etcd, CockroachDB, Hugo** are all Go. The standard library is broad and
+high-quality (its `net/http` and `encoding/json` cover the entire Feedbin client with no dependencies). The one
+soft spot relevant here — mature in-process terminal-image libraries — is covered by shelling out to `chafa`.
+
+**Long-term prospects.** Excellent and *stable* rather than *exciting*. Backed by Google, entrenched as the
+default language of backend services, cloud infrastructure, and CLI tooling, with a culture that deliberately
+resists churn. It won't surprise you and it won't disappear; the trade is that the things people wish Go had
+(sum types, less error boilerplate) tend to arrive slowly or not at all, on purpose.
+
+### 6.3 Which mindset fits you
+
+- Choose **Rust** if you want maximum performance and the strongest correctness guarantees, you find the
+  type system genuinely appealing (its `enum`/`match` is a near-perfect fit for TUI state and a clean undo
+  stack), and you're willing to pay in learning time and compile speed. It rewards patience with software that
+  is fast, small, and hard to break.
+- Choose **Go** if you want to be productive *quickly*, value a tiny language and fast builds, and are happy
+  to trade some expressiveness (notably the missing sum types) for simplicity and the best single-binary
+  distribution story in the business. It rewards you with momentum.
+
+Both are first-rate, actively governed, and a safe bet for the next decade. For roses specifically the earlier
+recommendation stands — Rust for the stated "max performance & polish," Go if "easy to build and maintain"
+quietly matters more — but at the language level, neither is a wrong answer; they're a temperament choice.
+
+---
+
 *Sources are linked inline throughout. Key references: [ratatui](https://ratatui.rs/) ·
 [ratatui-image](https://github.com/ratatui/ratatui-image) · [Bubble Tea](https://github.com/charmbracelet/bubbletea) ·
 [libvaxis](https://github.com/rockorager/libvaxis) · [notcurses](https://github.com/dankamongmen/notcurses) ·
