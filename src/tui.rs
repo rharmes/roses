@@ -1188,6 +1188,33 @@ pub fn run(client: Client) -> Result<()> {
     result
 }
 
+/// Preview the "all caught up" rose (TASK-14) without logging in or hitting the
+/// network — handy for eyeballing the empty state. Seeds the `Ready` + no-entries
+/// state and renders it until `q`/`Esc`.
+pub fn run_preview() -> Result<()> {
+    let mut app = App::new();
+    app.status = Status::Ready; // Ready with no entries → the caught-up screen
+    let mut terminal = ratatui::init();
+    let result = preview_loop(&mut terminal, &mut app);
+    ratatui::restore();
+    result
+}
+
+fn preview_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
+    loop {
+        terminal
+            .draw(|frame| app.draw(frame))
+            .context("drawing the UI")?;
+        if event::poll(TICK).context("polling for input")?
+            && let Event::Key(key) = event::read().context("reading input")?
+            && key.kind == KeyEventKind::Press
+            && matches!(key.code, KeyCode::Char('q') | KeyCode::Esc)
+        {
+            return Ok(());
+        }
+    }
+}
+
 fn run_loop(
     terminal: &mut DefaultTerminal,
     handle: &Handle,

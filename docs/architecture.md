@@ -30,6 +30,9 @@ cross-module use within the crate.
 - `list` → `run_list()` → `connect()`, fetch newest ≤20 unread, print `ui::format_unread()`. Headless
   fallback (handy over SSH / for piping).
 - `logout` → `config::logout()`.
+- `preview` → `tui::run_preview()` → renders the "all caught up" rose (the `Ready` + empty state) with
+  **no login or network**, so the empty state can be eyeballed without marking everything read; quits on
+  `q`/`Esc`.
 - anything else → an error with usage.
 
 `connect()` is the shared login path: `config::load_credentials()` (or prompt via `config::login()`

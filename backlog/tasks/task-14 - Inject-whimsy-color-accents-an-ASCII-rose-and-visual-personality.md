@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@ross'
 created_date: '2026-06-29 20:00'
-updated_date: '2026-06-29 22:24'
+updated_date: '2026-06-29 22:32'
 labels:
   - rust
   - ui
@@ -49,4 +49,6 @@ Tests: keep REVERSED test; add accent/footer/all-caught-up/loading-unchanged/tin
 
 <!-- SECTION:NOTES:BEGIN -->
 Implemented per approved plan + the 4 taste choices. New src/theme.rs (rose palette consts + lerp). Chrome-only rose accent: focused border+title (column_block), selection bar (highlight = fg(ROSE).reversed() — keeps REVERSED so the existing selection test passes), reader title, footer key letters (footer_help). All-caught-up (Ready+empty) short-circuits draw() to draw_caught_up(): vertically-centered ASCII rose, petals graded light→deep via theme::lerp, green stem, 'All caught up.' caption; footer always drawn; degrades to caption-only on tiny terminals. Loading/Failed unchanged. No rounded borders/spinner (not selected). Rendered + eyeballed the rose. 66 tests (theme lerp + 5 TUI: accent/footer/all-caught-up/loading-unchanged/tiny-fallback); fmt+clippy -D warnings clean; stable 10/10. docs/architecture.md updated (theme module row + Theme & whimsy section).
+
+Added 'roses preview' subcommand (user request): renders the all-caught-up rose offline — no login or network — so the empty state can be eyeballed without marking everything read. tui::run_preview() seeds Status::Ready + empty entries and runs a minimal draw loop that quits on q/Esc; wired into main.rs dispatch + usage. docs/architecture.md CLI dispatch updated. fmt+clippy clean, 66 tests, stable 10/10.
 <!-- SECTION:NOTES:END -->
