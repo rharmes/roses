@@ -7,7 +7,7 @@
 //! columns. Feedbin is queried on a background `tokio::spawn_blocking` task so
 //! input never blocks; results arrive over a channel drained each tick.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -221,54 +221,25 @@ impl App {
             .collect()
     }
 
-    /// Enqueue every not-yet-seen image across all loaded articles for
-    /// background pre-fetch, marking each `Loading` so it is fetched once. The
-    /// selected article's images go first so it's ready soonest.
+    /// Enqueue every not-yet-seen image for background pre-fetch in on-screen
+    /// order — sources top-to-bottom (by name), and within each source articles
+    /// top-to-bottom (oldest first) — marking each `Loading` so it is fetched
+    /// once.
     fn refill_image_queue(&mut self) {
-        let mut ordered: Vec<i64> = self.selected_article.into_iter().collect();
-        ordered.extend(
-            self.entries
-                .iter()
-                .map(|e| e.id)
-                .filter(|id| Some(*id) != self.selected_article),
-        );
-        for id in ordered {
-            let Some(entry) = self.entries.iter().find(|e| e.id == id) else {
-                continue;
-            };
-            for url in self.article_image_urls(entry) {
-                if !self.images.contains_key(&url) {
-                    self.images.insert(url.clone(), ImageState::Loading);
-                    self.image_queue.push_back(url);
+        let source_ids: Vec<i64> = self.sources().into_iter().map(|(id, _)| id).collect();
+        for feed_id in source_ids {
+            for article_id in self.article_ids(feed_id) {
+                let Some(entry) = self.entries.iter().find(|e| e.id == article_id) else {
+                    continue;
+                };
+                for url in self.article_image_urls(entry) {
+                    if !self.images.contains_key(&url) {
+                        self.images.insert(url.clone(), ImageState::Loading);
+                        self.image_queue.push_back(url);
+                    }
                 }
             }
         }
-    }
-
-    /// Move the selected article's queued images to the front so navigating to
-    /// an article fetches its images next.
-    fn prioritize_images(&mut self) {
-        if self.image_queue.is_empty() {
-            return;
-        }
-        let Some(entry) = self.selected_article_entry() else {
-            return;
-        };
-        let wanted: HashSet<String> = self.article_image_urls(entry).into_iter().collect();
-        if wanted.is_empty() {
-            return;
-        }
-        let mut front = VecDeque::with_capacity(self.image_queue.len());
-        let mut rest = Vec::new();
-        for url in self.image_queue.drain(..) {
-            if wanted.contains(&url) {
-                front.push_back(url);
-            } else {
-                rest.push(url);
-            }
-        }
-        front.extend(rest);
-        self.image_queue = front;
     }
 
     /// Pop the next image URL to fetch (already marked `Loading`).
@@ -1027,7 +998,6 @@ fn run_loop(
 ) -> Result<()> {
     let mut app = App::new();
     let mut images_in_flight = 0usize;
-    let mut last_selected = None;
     while !app.should_quit {
         while let Ok(msg) = rx.try_recv() {
             if matches!(msg, Msg::Image { .. }) {
@@ -1039,12 +1009,7 @@ fn run_loop(
             .draw(|frame| app.draw(frame))
             .context("drawing the UI")?;
 
-        // Pre-fetch images in the background: prioritize the article in view,
-        // then drain the queue up to the concurrency cap.
-        if app.selected_article != last_selected {
-            last_selected = app.selected_article;
-            app.prioritize_images();
-        }
+        // Drain the pre-fetch queue (top-to-bottom) up to the concurrency cap.
         while images_in_flight < MAX_IMAGE_FETCHES {
             let Some(url) = app.next_queued_image() else {
                 break;
@@ -1522,25 +1487,43 @@ mod tests {
     }
 
     #[test]
-    fn prioritize_moves_selected_articles_image_to_front() {
+    fn images_are_queued_top_to_bottom() {
+        // Two sources; the queue must follow on-screen order: sources by name
+        // (Apple before Banana), and within each, articles oldest-first.
         let mut feed_titles = HashMap::new();
-        feed_titles.insert(7, "Feed".to_string());
+        feed_titles.insert(9, "Apple".to_string());
+        feed_titles.insert(7, "Banana".to_string());
+        let mk = |id: i64, feed: i64, url: &str, published: &str| Entry {
+            id,
+            feed_id: feed,
+            title: Some(format!("t{id}")),
+            url: None,
+            published: Some(published.to_string()),
+            summary: None,
+            content: Some(format!("<img src=\"{url}\">")),
+        };
+        // Stored newest-first per source, as load() produces.
         let entries = vec![
-            img_entry(1, 7, "https://x/1.png"),
-            img_entry(2, 7, "https://x/2.png"),
-            img_entry(3, 7, "https://x/3.png"),
+            mk(2, 9, "apple-new", "2026-02"),
+            mk(1, 9, "apple-old", "2026-01"),
+            mk(4, 7, "banana-new", "2026-02"),
+            mk(3, 7, "banana-old", "2026-01"),
         ];
         let mut app = App::new();
         app.apply(Msg::Loaded(Ok(Loaded {
             entries,
             feed_titles,
-            total_unread: 3,
+            total_unread: 4,
         })));
-        app.selected_article = Some(2);
-        app.prioritize_images();
+        let queue: Vec<String> = app.image_queue.iter().cloned().collect();
         assert_eq!(
-            app.image_queue.front().map(String::as_str),
-            Some("https://x/2.png")
+            queue,
+            vec![
+                "apple-old".to_string(),
+                "apple-new".to_string(),
+                "banana-old".to_string(),
+                "banana-new".to_string(),
+            ]
         );
     }
 
