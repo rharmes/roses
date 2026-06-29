@@ -145,13 +145,22 @@ impl App {
         rows
     }
 
-    /// Ids of the loaded articles for one source, in published order.
-    fn article_ids(&self, feed_id: i64) -> Vec<i64> {
-        self.entries
+    /// Loaded articles for one source, **oldest first**. Entries are stored
+    /// newest-first, and the articles column reverses that so the oldest unread
+    /// item sits at the top (TASK-11).
+    fn articles(&self, feed_id: i64) -> Vec<&Entry> {
+        let mut articles: Vec<&Entry> = self
+            .entries
             .iter()
             .filter(|e| e.feed_id == feed_id)
-            .map(|e| e.id)
-            .collect()
+            .collect();
+        articles.reverse();
+        articles
+    }
+
+    /// Article ids for one source, oldest first (matching the displayed order).
+    fn article_ids(&self, feed_id: i64) -> Vec<i64> {
+        self.articles(feed_id).iter().map(|e| e.id).collect()
     }
 
     fn selected_article_entry(&self) -> Option<&Entry> {
@@ -495,9 +504,8 @@ impl App {
             return;
         };
         let items: Vec<ListItem> = self
-            .entries
+            .articles(feed_id)
             .iter()
-            .filter(|e| e.feed_id == feed_id)
             .map(|e| {
                 ListItem::new(Line::from(
                     e.title.as_deref().unwrap_or("(untitled)").to_string(),
@@ -890,6 +898,38 @@ mod tests {
         let app = app_with(&[(7, "Rust Blog", 2), (9, "Hacker News", 3)]);
         // Sorted by feed name: Hacker News (9) before Rust Blog (7).
         assert_eq!(app.sources(), vec![(9, 3), (7, 2)]);
+    }
+
+    #[test]
+    fn articles_show_oldest_first() {
+        // load() stores entries newest-first; the articles column reverses that.
+        let mut feed_titles = HashMap::new();
+        feed_titles.insert(9, "Feed".to_string());
+        let mk = |id: i64, published: &str| Entry {
+            id,
+            feed_id: 9,
+            title: Some(format!("a{id}")),
+            url: None,
+            published: Some(published.to_string()),
+            summary: None,
+            content: None,
+        };
+        // Newest-first, as load() produces (published descending).
+        let entries = vec![
+            mk(3, "2026-03-01T00:00:00Z"),
+            mk(2, "2026-02-01T00:00:00Z"),
+            mk(1, "2026-01-01T00:00:00Z"),
+        ];
+        let mut app = App::new();
+        app.apply(Msg::Loaded(Ok(Loaded {
+            entries,
+            feed_titles,
+            total_unread: 3,
+        })));
+        // The articles column shows oldest (id 1) at the top, newest (id 3) last.
+        assert_eq!(app.article_ids(9), vec![1, 2, 3]);
+        // The cursor starts on the top (oldest) article.
+        assert_eq!(app.selected_article, Some(1));
     }
 
     #[test]
