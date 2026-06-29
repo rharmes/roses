@@ -1,5 +1,8 @@
-- **Work in branches; never commit to main.** Commit as you work, but aim to land a single pull request
-  with all the changes and tests for a complete feature or change. 
+- **Do main-agent work in this checkout, on a branch — never in a worktree, never on `main`.**
+  Edit directly in `/Users/ross/Documents/roses/` (a worktree would hide changes from the working copy
+  the user is running; subagents may still isolate). **Commit *and* push as you go.** Aim to land a
+  single pull request with all the changes and tests for a complete feature or change — and **ask before
+  opening the PR.**
 - **Credentials never live in the repo.** Keep a defensive `.gitignore` entry for the config filename 
   in case a copy strays in.
 - **Very low tolerance for flaky tests.** A test that passes only *sometimes* is a defect — in the
