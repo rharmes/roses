@@ -7,6 +7,8 @@
 //! (TASK-6), so the proof-of-concept uses the blocking `reqwest` client.
 //! API shape: `docs/tui_research.md` §4.1.
 
+use std::collections::HashMap;
+
 use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 
@@ -25,13 +27,21 @@ const USER_AGENT: &str = concat!("roses/", env!("CARGO_PKG_VERSION"));
 /// nullable, so they are `Option` to avoid panicking on real-world data
 /// (AC #5). Extra response fields (content, summary, author, …) are ignored.
 #[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)] // fields are consumed by the stdout renderer in TASK-4
+#[allow(dead_code)] // `id` feeds the read/unread sync in TASK-7; the rest render in `ui`
 pub struct Entry {
     pub id: i64,
     pub feed_id: i64,
     pub title: Option<String>,
     pub url: Option<String>,
     pub published: Option<String>,
+}
+
+/// One Feedbin subscription. Used only to map a `feed_id` to its display title;
+/// the other fields (id, feed_url, site_url, created_at) are ignored.
+#[derive(Debug, Clone, Deserialize)]
+struct Subscription {
+    feed_id: i64,
+    title: Option<String>,
 }
 
 /// A blocking Feedbin v2 client bound to one set of credentials.
@@ -117,6 +127,23 @@ impl Client {
             entries.extend(batch);
         }
         Ok(entries)
+    }
+
+    /// Map each subscribed `feed_id` to its display title, so entries can be
+    /// shown with the feed they came from. Feeds with no title are omitted and
+    /// fall back to a placeholder at render time.
+    pub fn feed_titles(&self) -> Result<HashMap<i64, String>> {
+        let resp = self
+            .get("subscriptions.json")
+            .send()
+            .context("requesting subscriptions from Feedbin")?;
+        let subscriptions = check_status(resp)?
+            .json::<Vec<Subscription>>()
+            .context("parsing the subscriptions response")?;
+        Ok(subscriptions
+            .into_iter()
+            .filter_map(|s| s.title.map(|title| (s.feed_id, title)))
+            .collect())
     }
 }
 
@@ -250,5 +277,24 @@ mod tests {
         let client = test_client(&server);
         assert!(client.entries(&[]).unwrap().is_empty());
         m.assert();
+    }
+
+    #[test]
+    fn feed_titles_maps_feed_id_to_title() {
+        let mut server = mockito::Server::new();
+        let body = r#"[
+            {"id": 1, "feed_id": 7, "title": "Rust Blog", "feed_url": "https://blog.rust-lang.org/feed.xml", "site_url": "https://blog.rust-lang.org"},
+            {"id": 2, "feed_id": 9, "title": null}
+        ]"#;
+        server
+            .mock("GET", "/v2/subscriptions.json")
+            .with_status(200)
+            .with_body(body)
+            .create();
+        let client = test_client(&server);
+        let titles = client.feed_titles().unwrap();
+        assert_eq!(titles.get(&7).map(String::as_str), Some("Rust Blog"));
+        // A null-titled feed is omitted (renders as a placeholder later).
+        assert!(!titles.contains_key(&9));
     }
 }

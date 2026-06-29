@@ -9,7 +9,12 @@ mod config;
 mod feedbin;
 mod ui;
 
+use std::collections::HashMap;
+
 use anyhow::Result;
+
+/// How many of the newest unread entries to render in the plain-text list.
+const DISPLAY_LIMIT: usize = 20;
 
 fn main() -> Result<()> {
     if std::env::args().nth(1).as_deref() == Some("logout") {
@@ -33,17 +38,29 @@ fn main() -> Result<()> {
 
     let client = feedbin::Client::new(&credentials)?;
     client.authenticate()?;
-    println!("Authenticated with Feedbin as {}.", credentials.email);
+    println!("Authenticated with Feedbin as {}.\n", credentials.email);
 
-    let unread = client.unread_entry_ids()?;
-    println!("{} unread entries.", unread.len());
+    let mut unread = client.unread_entry_ids()?;
+    let total_unread = unread.len();
 
-    // Hydrate a small batch as a smoke test; rich rendering arrives in TASK-4.
-    let batch: Vec<i64> = unread.iter().copied().take(20).collect();
-    let entries = client.entries(&batch)?;
-    println!(
-        "Fetched {} entries (display lands in TASK-4).",
-        entries.len()
+    let (entries, feed_titles) = if unread.is_empty() {
+        (Vec::new(), HashMap::new())
+    } else {
+        // Feedbin entry IDs grow over time, so the largest IDs are the newest;
+        // show a readable sample of those.
+        unread.sort_unstable_by(|a, b| b.cmp(a));
+        let sample: Vec<i64> = unread.into_iter().take(DISPLAY_LIMIT).collect();
+
+        let feed_titles = client.feed_titles()?;
+        let mut entries = client.entries(&sample)?;
+        // entries.json need not preserve the requested order; show newest first.
+        entries.sort_by(|a, b| b.published.cmp(&a.published));
+        (entries, feed_titles)
+    };
+
+    print!(
+        "{}",
+        ui::format_unread(&entries, &feed_titles, total_unread)
     );
     Ok(())
 }
