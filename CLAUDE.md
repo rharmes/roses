@@ -15,6 +15,20 @@
 - **Suggest guardrails when a pattern emerges.** If the same kind of command keeps coming up,
   suggest a permission allow-rule or a small wrapper script to remove the repeated prompt.
 
+## Development
+
+`roses` is a Rust binary crate (edition 2024). The toolchain is pinned in
+`rust-toolchain.toml`; rustup puts these commands on your PATH:
+
+- `cargo run` — build and run the app
+- `cargo build` (`--release` for optimized) — compile
+- `cargo test` — run tests
+- `cargo fmt` — format; `cargo clippy` — lint
+
+Source layout under `src/`: `config` (settings + keychain credentials),
+`feedbin` (Feedbin API client), `ui` (output — stdout now, ratatui later).
+Stack rationale and the build-out plan live in `docs/tui_research.md`.
+
 <!-- BACKLOG.MD GUIDELINES START -->
 <CRITICAL_INSTRUCTION>
 

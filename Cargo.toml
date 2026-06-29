@@ -1,0 +1,10 @@
+[package]
+name = "roses"
+version = "0.1.0"
+edition = "2024"
+description = "A TUI RSS reader, backed by Feedbin."
+license = "MIT"
+repository = "https://github.com/rharmes/roses"
+readme = "README.md"
+
+[dependencies]

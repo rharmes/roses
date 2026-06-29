@@ -1,3 +1,6 @@
 .nova
 .DS_Store
 .claude/
+
+# Rust build artifacts
+/target
