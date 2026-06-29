@@ -24,6 +24,21 @@ pub struct Credentials {
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Settings {
     email: Option<String>,
+    /// Command template to open article URLs (`%s`/`{url}` placeholder, else the
+    /// URL is appended). Falls back to `$BROWSER`, then the platform opener.
+    browser: Option<String>,
+    /// Whether `browser` is a terminal browser (roses suspends the TUI for it).
+    browser_terminal: Option<bool>,
+}
+
+/// The user's browser preference from config. `$BROWSER` and the platform
+/// default opener are applied by the `browser` module, not here.
+#[derive(Debug, Default, Clone)]
+pub struct BrowserPref {
+    /// User-configured command template, if any.
+    pub command: Option<String>,
+    /// Whether the configured browser runs inside the terminal.
+    pub terminal: bool,
 }
 
 /// Pure (testable) XDG resolution: `$XDG_CONFIG_HOME/roses` if set and
@@ -98,6 +113,15 @@ pub fn load_credentials() -> Result<Option<Credentials>> {
     Ok(get_password(&email)?.map(|password| Credentials { email, password }))
 }
 
+/// Load the user's browser preference from the config file (empty if unset).
+pub fn load_browser_pref() -> Result<BrowserPref> {
+    let settings = load_settings()?;
+    Ok(BrowserPref {
+        command: settings.browser,
+        terminal: settings.browser_terminal.unwrap_or(false),
+    })
+}
+
 /// Interactively prompt for an email and (hidden) password, store the password
 /// in the OS keychain and the email in the TOML config, and return them.
 pub fn login() -> Result<Credentials> {
@@ -111,18 +135,21 @@ pub fn login() -> Result<Credentials> {
         return Err(anyhow!("password must not be empty"));
     }
     store_password(&email, &password)?;
-    save_settings(&Settings {
-        email: Some(email.clone()),
-    })?;
+    // Merge into existing settings so non-secret prefs (e.g. browser) survive.
+    let mut settings = load_settings().unwrap_or_default();
+    settings.email = Some(email.clone());
+    save_settings(&settings)?;
     Ok(Credentials { email, password })
 }
 
-/// Clear the stored password from the keychain and forget the email.
+/// Clear the stored password from the keychain and forget the email, keeping
+/// other settings (e.g. the browser preference) intact.
 pub fn logout() -> Result<()> {
-    if let Some(email) = load_settings()?.email {
+    let mut settings = load_settings().unwrap_or_default();
+    if let Some(email) = settings.email.take() {
         delete_password(&email)?;
     }
-    save_settings(&Settings::default())
+    save_settings(&settings)
 }
 
 fn prompt_line(prompt: &str) -> Result<String> {
@@ -143,6 +170,7 @@ mod tests {
     fn settings_round_trip_through_toml() {
         let settings = Settings {
             email: Some("reader@example.com".to_string()),
+            ..Default::default()
         };
         let text = toml::to_string_pretty(&settings).unwrap();
         let parsed: Settings = toml::from_str(&text).unwrap();

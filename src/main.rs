@@ -8,8 +8,10 @@
 //! Modules: `config` (credentials), `feedbin` (API client), `ui` (stdout
 //! rendering), `tui` (ratatui app).
 
+mod browser;
 mod config;
 mod feedbin;
+mod images;
 mod tui;
 mod ui;
 
