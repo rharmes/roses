@@ -10,6 +10,8 @@
 use std::collections::HashMap;
 
 use anyhow::{Context, Result, anyhow};
+use reqwest::Method;
+use reqwest::header::CONTENT_TYPE;
 use serde::Deserialize;
 
 use crate::config::Credentials;
@@ -20,6 +22,9 @@ const DEFAULT_BASE_URL: &str = "https://api.feedbin.com/v2";
 
 /// Feedbin caps `entries.json?ids=` at 100 IDs per request.
 const MAX_IDS_PER_REQUEST: usize = 100;
+
+/// Feedbin caps the `unread_entries` write endpoints at 1,000 IDs per request.
+const MAX_UNREAD_IDS_PER_REQUEST: usize = 1000;
 
 const USER_AGENT: &str = concat!("roses/", env!("CARGO_PKG_VERSION"));
 
@@ -153,6 +158,47 @@ impl Client {
             .into_iter()
             .filter_map(|s| s.title.map(|title| (s.feed_id, title)))
             .collect())
+    }
+
+    /// Mark entries read by removing them from Feedbin's unread set
+    /// (`DELETE /unread_entries.json`). Returns the IDs the server reports as
+    /// actually changed. Batched at the 1,000-ID limit (AC #3).
+    pub fn mark_read(&self, ids: &[i64]) -> Result<Vec<i64>> {
+        self.write_unread(Method::DELETE, ids)
+    }
+
+    /// Restore entries to unread (`POST /unread_entries.json`) — the undo for
+    /// [`Client::mark_read`]. Returns the IDs the server reports as changed.
+    pub fn mark_unread(&self, ids: &[i64]) -> Result<Vec<i64>> {
+        self.write_unread(Method::POST, ids)
+    }
+
+    /// Shared body for the unread-state writes: send `{"unread_entries": [...]}`
+    /// in <=1,000-ID batches and collect the changed IDs the server echoes back.
+    /// An empty `ids` slice makes no request.
+    fn write_unread(&self, method: Method, ids: &[i64]) -> Result<Vec<i64>> {
+        let mut changed = Vec::new();
+        for chunk in ids.chunks(MAX_UNREAD_IDS_PER_REQUEST) {
+            let csv = chunk
+                .iter()
+                .map(|id| id.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            let body = format!("{{\"unread_entries\":[{csv}]}}");
+            let resp = self
+                .http
+                .request(method.clone(), self.url("unread_entries.json"))
+                .basic_auth(&self.email, Some(&self.password))
+                .header(CONTENT_TYPE, "application/json; charset=utf-8")
+                .body(body)
+                .send()
+                .context("sending an unread-state write to Feedbin")?;
+            let batch = check_status(resp)?
+                .json::<Vec<i64>>()
+                .context("parsing the unread-state write response")?;
+            changed.extend(batch);
+        }
+        Ok(changed)
     }
 }
 
@@ -305,5 +351,63 @@ mod tests {
         assert_eq!(titles.get(&7).map(String::as_str), Some("Rust Blog"));
         // A null-titled feed is omitted (renders as a placeholder later).
         assert!(!titles.contains_key(&9));
+    }
+
+    #[test]
+    fn mark_read_sends_delete_with_json_body() {
+        let mut server = mockito::Server::new();
+        let m = server
+            .mock("DELETE", "/v2/unread_entries.json")
+            .match_header("content-type", "application/json; charset=utf-8")
+            .match_body(r#"{"unread_entries":[5,6]}"#)
+            .with_status(200)
+            .with_body("[5,6]")
+            .create();
+        let client = test_client(&server);
+        assert_eq!(client.mark_read(&[5, 6]).unwrap(), vec![5, 6]);
+        m.assert();
+    }
+
+    #[test]
+    fn mark_unread_sends_post_with_json_body() {
+        let mut server = mockito::Server::new();
+        let m = server
+            .mock("POST", "/v2/unread_entries.json")
+            .match_body(r#"{"unread_entries":[42]}"#)
+            .with_status(200)
+            .with_body("[42]")
+            .create();
+        let client = test_client(&server);
+        assert_eq!(client.mark_unread(&[42]).unwrap(), vec![42]);
+        m.assert();
+    }
+
+    #[test]
+    fn unread_writes_batch_at_the_1000_id_limit() {
+        let mut server = mockito::Server::new();
+        // 1500 IDs must split into two requests (1000 + 500).
+        let m = server
+            .mock("DELETE", "/v2/unread_entries.json")
+            .match_body(mockito::Matcher::Any)
+            .with_status(200)
+            .with_body("[]")
+            .expect(2)
+            .create();
+        let client = test_client(&server);
+        let ids: Vec<i64> = (1..=1500).collect();
+        assert!(client.mark_read(&ids).unwrap().is_empty());
+        m.assert();
+    }
+
+    #[test]
+    fn empty_unread_write_makes_no_request() {
+        let mut server = mockito::Server::new();
+        let m = server
+            .mock("DELETE", "/v2/unread_entries.json")
+            .expect(0)
+            .create();
+        let client = test_client(&server);
+        assert!(client.mark_read(&[]).unwrap().is_empty());
+        m.assert();
     }
 }

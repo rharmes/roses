@@ -36,15 +36,39 @@ struct Loaded {
     total_unread: usize,
 }
 
-/// Message from the background fetch worker to the UI loop.
+/// Which unread-state write a background task performed.
+#[derive(Clone, Copy)]
+enum WriteOp {
+    MarkRead,
+    Undo,
+}
+
+/// An entry that was marked read and can be restored, remembering where it sat
+/// in the list so undo can put it back.
+struct Undone {
+    entry: Entry,
+    index: usize,
+}
+
+/// Message from a background worker to the UI loop.
 enum Msg {
     Loaded(Result<Loaded, String>),
+    /// Result of a mark-read / undo write, carrying the entry + index so the UI
+    /// can finalize on success or roll back on failure (AC #4).
+    Write {
+        op: WriteOp,
+        entry: Entry,
+        index: usize,
+        result: Result<(), String>,
+    },
 }
 
 /// What a keypress asks the run loop to do beyond mutating `App`.
 enum Action {
     None,
     Reload,
+    MarkRead,
+    Undo,
 }
 
 enum Status {
@@ -60,6 +84,10 @@ struct App {
     total_unread: usize,
     list_state: ListState,
     reader_scroll: u16,
+    /// Marked-read entries that can be restored, most recent last (AC #2).
+    undo_stack: Vec<Undone>,
+    /// Transient status line (e.g. a write failure); cleared on the next key.
+    notice: Option<String>,
     should_quit: bool,
 }
 
@@ -72,6 +100,8 @@ impl App {
             total_unread: 0,
             list_state: ListState::default(),
             reader_scroll: 0,
+            undo_stack: Vec::new(),
+            notice: None,
             should_quit: false,
         }
     }
@@ -86,8 +116,87 @@ impl App {
                 self.list_state
                     .select((!self.entries.is_empty()).then_some(0));
                 self.reader_scroll = 0;
+                // A fresh list invalidates pending undos.
+                self.undo_stack.clear();
+                self.notice = None;
             }
             Msg::Loaded(Err(err)) => self.status = Status::Failed(err),
+
+            // A confirmed mark-read becomes undoable; a failed one is rolled back.
+            Msg::Write {
+                op: WriteOp::MarkRead,
+                entry,
+                index,
+                result,
+            } => match result {
+                Ok(()) => self.undo_stack.push(Undone { entry, index }),
+                Err(err) => {
+                    self.reinsert(entry, index);
+                    self.notice = Some(format!("Mark read failed (restored): {err}"));
+                }
+            },
+
+            // A confirmed undo is already reflected; a failed one is rolled back
+            // (the entry is still read on the server) but stays retryable.
+            Msg::Write {
+                op: WriteOp::Undo,
+                entry,
+                index,
+                result,
+            } => {
+                if let Err(err) = result {
+                    if let Some(pos) = self.entries.iter().position(|e| e.id == entry.id) {
+                        self.entries.remove(pos);
+                        self.total_unread = self.total_unread.saturating_sub(1);
+                        self.fix_selection_after_removal(pos);
+                    }
+                    self.undo_stack.push(Undone { entry, index });
+                    self.notice = Some(format!("Undo failed (kept read): {err}"));
+                }
+            }
+        }
+    }
+
+    /// Optimistically mark the selected entry read: drop it from the list now;
+    /// the caller fires the network write and the result confirms or rolls back.
+    /// Returns the removed entry and its index, or `None` if nothing is selected.
+    fn begin_mark_read(&mut self) -> Option<(Entry, usize)> {
+        let index = self.list_state.selected()?;
+        if index >= self.entries.len() {
+            return None;
+        }
+        let entry = self.entries.remove(index);
+        self.total_unread = self.total_unread.saturating_sub(1);
+        self.fix_selection_after_removal(index);
+        self.reader_scroll = 0;
+        Some((entry, index))
+    }
+
+    /// Optimistically restore the most recently marked-read entry. Returns the
+    /// entry and its original index for the network write, or `None` if the undo
+    /// stack is empty.
+    fn begin_undo(&mut self) -> Option<(Entry, usize)> {
+        let Undone { entry, index } = self.undo_stack.pop()?;
+        self.reinsert(entry.clone(), index);
+        Some((entry, index))
+    }
+
+    /// Re-insert an entry near its original index, bumping the unread count and
+    /// selecting it. Used by undo and by mark-read rollback.
+    fn reinsert(&mut self, entry: Entry, index: usize) {
+        let at = index.min(self.entries.len());
+        self.entries.insert(at, entry);
+        self.total_unread = self.total_unread.saturating_add(1);
+        self.list_state.select(Some(at));
+        self.reader_scroll = 0;
+    }
+
+    fn fix_selection_after_removal(&mut self, removed_index: usize) {
+        if self.entries.is_empty() {
+            self.list_state.select(None);
+        } else {
+            self.list_state
+                .select(Some(removed_index.min(self.entries.len() - 1)));
         }
     }
 
@@ -135,20 +244,24 @@ impl App {
         }
     }
 
-    /// Handle one key press; returns whether a reload was requested.
+    /// Handle one key press, mutating selection/scroll directly and returning an
+    /// [`Action`] for effects the run loop must drive (network writes, reload).
     fn handle_key(&mut self, code: KeyCode) -> Action {
+        self.notice = None;
         match code {
             KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
             KeyCode::Down | KeyCode::Char('j') => self.select_next(),
             KeyCode::Up | KeyCode::Char('k') => self.select_prev(),
             KeyCode::Char('g') | KeyCode::Home => self.select_first(),
             KeyCode::Char('G') | KeyCode::End => self.select_last(),
-            KeyCode::PageDown | KeyCode::Char('d') | KeyCode::Char(' ') => {
+            KeyCode::PageDown | KeyCode::Char(' ') => {
                 self.reader_scroll = self.reader_scroll.saturating_add(READER_PAGE);
             }
-            KeyCode::PageUp | KeyCode::Char('u') => {
+            KeyCode::PageUp | KeyCode::Char('b') => {
                 self.reader_scroll = self.reader_scroll.saturating_sub(READER_PAGE);
             }
+            KeyCode::Char('m') => return Action::MarkRead,
+            KeyCode::Char('u') => return Action::Undo,
             KeyCode::Char('r') => return Action::Reload,
             _ => {}
         }
@@ -165,8 +278,14 @@ impl App {
         self.draw_list(frame, list_area);
         self.draw_reader(frame, reader_area);
 
-        let help = Line::from(" ↑/↓ select · u/d scroll · r reload · q quit ").dim();
-        frame.render_widget(help, footer);
+        let footer_line = match &self.notice {
+            Some(text) => Line::from(format!(" {text} ")).red(),
+            None => {
+                Line::from(" ↑/↓ select · space/b scroll · m read · u undo · r reload · q quit ")
+                    .dim()
+            }
+        };
+        frame.render_widget(footer_line, footer);
     }
 
     fn draw_list(&mut self, frame: &mut Frame, area: ratatui::layout::Rect) {
@@ -422,6 +541,34 @@ fn spawn_fetch(handle: &Handle, client: Client, tx: UnboundedSender<Msg>) {
     });
 }
 
+/// Run a mark-read / undo network write on the blocking pool and report the
+/// outcome — with the entry + index for rollback — back to the UI loop.
+fn spawn_write(
+    handle: &Handle,
+    client: &Client,
+    tx: &UnboundedSender<Msg>,
+    op: WriteOp,
+    entry: Entry,
+    index: usize,
+) {
+    let client = client.clone();
+    let tx = tx.clone();
+    let id = entry.id;
+    handle.spawn_blocking(move || {
+        let net = match op {
+            WriteOp::MarkRead => client.mark_read(&[id]),
+            WriteOp::Undo => client.mark_unread(&[id]),
+        };
+        let result = net.map(|_| ()).map_err(|e| format!("{e:#}"));
+        let _ = tx.send(Msg::Write {
+            op,
+            entry,
+            index,
+            result,
+        });
+    });
+}
+
 /// Blocking fetch of the newest unread entries plus their feed names. Runs on
 /// tokio's blocking pool via [`spawn_fetch`].
 fn load(client: &Client) -> Result<Loaded> {
@@ -480,15 +627,27 @@ fn run_loop(
             .draw(|frame| app.draw(frame))
             .context("drawing the UI")?;
 
-        // `handle_key` is evaluated for every key press (for its nav/quit side
-        // effects); the body runs only when it asks for a reload.
         if event::poll(TICK).context("polling for input")?
             && let Event::Key(key) = event::read().context("reading input")?
             && key.kind == KeyEventKind::Press
-            && let Action::Reload = app.handle_key(key.code)
         {
-            app.status = Status::Loading;
-            spawn_fetch(handle, client.clone(), tx.clone());
+            match app.handle_key(key.code) {
+                Action::None => {}
+                Action::Reload => {
+                    app.status = Status::Loading;
+                    spawn_fetch(handle, client.clone(), tx.clone());
+                }
+                Action::MarkRead => {
+                    if let Some((entry, index)) = app.begin_mark_read() {
+                        spawn_write(handle, client, tx, WriteOp::MarkRead, entry, index);
+                    }
+                }
+                Action::Undo => {
+                    if let Some((entry, index)) = app.begin_undo() {
+                        spawn_write(handle, client, tx, WriteOp::Undo, entry, index);
+                    }
+                }
+            }
         }
     }
     Ok(())
@@ -635,6 +794,102 @@ mod tests {
         assert!(
             rendered.contains("caught up"),
             "shows the friendly empty state"
+        );
+    }
+
+    #[test]
+    fn mark_read_removes_optimistically_and_failure_rolls_back() {
+        let mut app = ready_app(3);
+        let (entry, index) = app.begin_mark_read().expect("an entry is selected");
+        assert_eq!(app.entries.len(), 2, "removed from the list immediately");
+        assert_eq!(app.total_unread, 2);
+        assert!(
+            app.undo_stack.is_empty(),
+            "undo only after the server confirms"
+        );
+
+        app.apply(Msg::Write {
+            op: WriteOp::MarkRead,
+            entry,
+            index,
+            result: Err("boom".to_string()),
+        });
+        assert_eq!(app.entries.len(), 3, "rolled back on failure");
+        assert_eq!(app.total_unread, 3);
+        assert!(app.undo_stack.is_empty());
+        assert!(app.notice.is_some(), "the failure is surfaced");
+    }
+
+    #[test]
+    fn mark_read_success_then_undo_round_trips() {
+        let mut app = ready_app(3);
+        let (entry, index) = app.begin_mark_read().unwrap();
+        app.apply(Msg::Write {
+            op: WriteOp::MarkRead,
+            entry,
+            index,
+            result: Ok(()),
+        });
+        assert_eq!(app.entries.len(), 2);
+        assert_eq!(app.undo_stack.len(), 1, "now undoable");
+
+        let (entry, index) = app.begin_undo().expect("something to undo");
+        assert_eq!(app.entries.len(), 3, "undo re-inserts immediately");
+        assert_eq!(app.total_unread, 3);
+        assert!(app.undo_stack.is_empty());
+        app.apply(Msg::Write {
+            op: WriteOp::Undo,
+            entry,
+            index,
+            result: Ok(()),
+        });
+        assert_eq!(app.entries.len(), 3);
+    }
+
+    #[test]
+    fn undo_failure_keeps_entry_read_and_retryable() {
+        let mut app = ready_app(3);
+        let (entry, index) = app.begin_mark_read().unwrap();
+        app.apply(Msg::Write {
+            op: WriteOp::MarkRead,
+            entry,
+            index,
+            result: Ok(()),
+        });
+
+        let (entry, index) = app.begin_undo().unwrap();
+        app.apply(Msg::Write {
+            op: WriteOp::Undo,
+            entry,
+            index,
+            result: Err("nope".to_string()),
+        });
+        assert_eq!(app.entries.len(), 2, "rolled back to read");
+        assert_eq!(app.total_unread, 2);
+        assert_eq!(app.undo_stack.len(), 1, "still retryable");
+        assert!(app.notice.is_some());
+    }
+
+    #[test]
+    fn fresh_load_clears_the_undo_stack() {
+        let mut app = ready_app(3);
+        let (entry, index) = app.begin_mark_read().unwrap();
+        app.apply(Msg::Write {
+            op: WriteOp::MarkRead,
+            entry,
+            index,
+            result: Ok(()),
+        });
+        assert_eq!(app.undo_stack.len(), 1);
+
+        app.apply(Msg::Loaded(Ok(Loaded {
+            entries: Vec::new(),
+            feed_titles: HashMap::new(),
+            total_unread: 0,
+        })));
+        assert!(
+            app.undo_stack.is_empty(),
+            "reload invalidates pending undos"
         );
     }
 }
