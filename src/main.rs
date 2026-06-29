@@ -12,6 +12,7 @@ mod browser;
 mod config;
 mod feedbin;
 mod images;
+mod theme;
 mod tui;
 mod ui;
 
@@ -33,8 +34,11 @@ fn main() -> Result<()> {
             println!("Logged out — stored Feedbin credentials cleared.");
             Ok(())
         }
+        // Render the "all caught up" screen offline (no login/network) so the
+        // empty state can be previewed without marking everything read.
+        Some("preview") => tui::run_preview(),
         Some(other) => Err(anyhow!(
-            "unknown command {other:?}. Usage: roses [list | logout]"
+            "unknown command {other:?}. Usage: roses [list | logout | preview]"
         )),
     }
 }
