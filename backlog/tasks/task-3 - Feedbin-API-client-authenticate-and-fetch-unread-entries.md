@@ -1,11 +1,11 @@
 ---
 id: TASK-3
 title: 'Feedbin API client: authenticate and fetch unread entries'
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-06-29 00:56'
-updated_date: '2026-06-29 14:13'
+updated_date: '2026-06-29 14:18'
 labels:
   - poc
   - rust
