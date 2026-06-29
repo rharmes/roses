@@ -1,11 +1,11 @@
 ---
 id: TASK-11
 title: Three-column layout (sources / articles / reader) with focus-cursor navigation
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-06-29 16:22'
-updated_date: '2026-06-29 16:47'
+updated_date: '2026-06-29 16:57'
 labels:
   - rust
   - ui
@@ -42,7 +42,7 @@ Navigation is a single focus 'cursor' shown via reversed text (light-on-dark or 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [x] #1 The TUI renders three columns side by side: sources (each with a count of its unread items), articles for the selected source, and the reader for the selected article.
-- [ ] #2 A single focus cursor marks the active column and item using reversed text (legible whether the terminal is light or dark); it starts on the first source.
+- [x] #2 A single focus cursor marks the active column and item using reversed text (legible whether the terminal is light or dark); it starts on the first source.
 - [x] #3 Up/Down (and k/j) move the cursor within the focused column only; no pane scrolls independently of the cursor.
 - [x] #4 Right/Left (and l/h) move focus across columns (sources -> articles -> reader and back), preserving each column's cursor position.
 - [x] #5 Selecting a source populates the articles column with that source's unread items; while focus is on a source, the reader column is empty.
@@ -59,3 +59,9 @@ Rewrote src/tui.rs into a three-column Miller layout (sources | articles | reade
 
 Bugfix (found in live review): reader pane didn't scroll with up/down while focused. Root cause — scroll was clamped against text.lines.len() (the unwrapped line count); a single long paragraph is one line that word-wraps to many rows, so max_scroll was 0 and each redraw snapped reader_scroll back to 0. Fix: clamp against the wrapped height via Paragraph::line_count(inner_width) on a block-less measurement paragraph (enabled ratatui feature unstable-rendered-line-info). Added a regression test (reader_scrolls_long_wrapped_content, reproduced red then green). 33 tests, stable 10x.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Redesigned the TUI into a three-column Miller layout: sources (feeds + unread counts) | articles for the selected source (oldest-first) | scrollable reader. A single focus cursor (reversed text on the focused column's selected row, bold elsewhere; focused column gets a bold border) moves with arrows/hjkl — up/down within the focused column, left/right between columns, preserving each column's cursor. A focused source shows an empty reader; moving right reveals the article; the reader scrolls when focused. m/u (mark read / undo) act in the articles column with the TASK-7 optimistic+rollback model, adapted to id-based selection. Selection tracked by id so it survives edits. Two review fixes: reader scroll now clamps to the wrapped height (Paragraph::line_count, ratatui unstable-rendered-line-info) so long word-wrapped articles scroll; articles shown oldest-first. Verified: fmt, clippy -D warnings, 34 tests (TestBackend three-column render, grouping/counts, focus transitions + cursor preservation, mark/undo round-trip + rollback, reader-scroll regression, oldest-first order), stable 10x + green CI; user live-verified cursor/nav/scroll/ordering. Per-source counts are over the loaded ~50-entry window (true per-feed totals a possible follow-up).
+<!-- SECTION:FINAL_SUMMARY:END -->
