@@ -32,10 +32,15 @@ CI mirrors these: every push and PR must pass `cargo fmt --all --check`,
 `cargo clippy --all-targets -- -D warnings`, and `cargo test --locked`. Run
 those three before pushing — see `docs/ci.md` for the pipeline walkthrough.
 
-Source layout under `src/`: `config` (settings + keychain credentials),
-`feedbin` (Feedbin API client), `ui` (plain-stdout list — `roses list`),
-`tui` (full-screen ratatui app — the default `roses`). Stack rationale and
-the build-out plan live in `docs/tui_research.md`.
+Source layout under `src/`: `main` (CLI dispatch), `config` (settings +
+keychain credentials), `feedbin` (Feedbin API client), `ui` (plain-stdout
+list — `roses list`), `tui` (full-screen ratatui app — the default `roses`),
+`browser` (open article URLs), `images` (half-block image rendering).
+
+Architecture and data model are documented in @docs/architecture.md and
+@docs/data-model.md (imported into context) — keep them current in the *same
+commit* when the architecture or types change. Stack rationale and the
+build-out plan live in `docs/tui_research.md`.
 
 <!-- BACKLOG.MD GUIDELINES START -->
 <CRITICAL_INSTRUCTION>
