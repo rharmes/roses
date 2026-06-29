@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-06-29 00:56'
-updated_date: '2026-06-29 13:21'
+updated_date: '2026-06-29 13:32'
 labels:
   - poc
   - rust
@@ -27,9 +27,9 @@ Prompt for the user's Feedbin email and password on first run and store them saf
 <!-- AC:BEGIN -->
 - [ ] #1 First run prompts for email and password, with the password entry hidden (e.g. rpassword)
 - [ ] #2 Password is stored in the OS keychain via the keyring crate (macOS Keychain / Linux Secret Service)
-- [ ] #3 Email and non-secret settings are saved as TOML under XDG_CONFIG_HOME/roses (honoring the env var, default ~/.config)
+- [x] #3 Email and non-secret settings are saved as TOML under XDG_CONFIG_HOME/roses (honoring the env var, default ~/.config)
 - [ ] #4 Subsequent runs load the credential from the keychain without re-prompting; a logout path can clear it
-- [ ] #5 No secret is written to the repo or any plaintext file; the config path is gitignored
+- [x] #5 No secret is written to the repo or any plaintext file; the config path is gitignored
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -235,4 +235,23 @@ config.toml
    - cargo run         -> "Welcome back, <email>" with NO re-prompt          (AC#4)
    - cargo run logout  -> clears the keychain entry and forgets the email
 7. Check ACs, write final summary, commit on rust-poc, mark TASK-2 Done, then start TASK-3.
+
+=== Implementation landed on rust-poc (this session) ===
+
+Recreated the drafted files directly in the checkout (bg-isolation guard disabled with user approval for this session):
+- src/config.rs — full implementation: Credentials/Settings types; pure config_dir_from() XDG resolution; load/save TOML; keyring store/get/delete; load_credentials()/login()/logout(); prompt_line(); 5 unit tests.
+- src/main.rs — entry point: 'logout' subcommand, load-or-prompt flow, friendly status lines.
+- .gitignore — appended 'config.toml' (defensive).
+
+keyring v4 API confirmed by compilation: Entry::new, set_password, get_password, delete_credential(), Error::NoEntry — all correct, no changes needed from the draft.
+
+Automated verification (all pass):
+- cargo fmt --check: clean
+- cargo build: clean
+- cargo clippy --all-targets -- -D warnings: no warnings
+- cargo test: 5/5 pass (XDG default+override, empty settings, TOML round-trip asserting no 'password' field)
+- Smoke test: XDG_CONFIG_HOME=<tmp> cargo run -- logout -> prints logout msg, writes an EMPTY config.toml under the temp XDG dir, leaves real ~/.config/roses untouched.
+
+AC status: #3 (XDG/TOML) and #5 (no secret on disk, gitignored) VERIFIED and checked.
+#1 (interactive email + hidden password prompt), #2 (live keychain store), #4 (no-reprompt reload + logout-clears) are IMPLEMENTED but need an interactive TTY + the live Feedbin account to verify end-to-end — that's the user's step. Once that passes, check #1/#2/#4 and mark Done, then start TASK-3.
 <!-- SECTION:NOTES:END -->
