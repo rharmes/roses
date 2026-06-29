@@ -127,6 +127,14 @@ true content rect derives it from `block.inner(area)` (which accounts for border
 than a hardcoded `area − 2`: the reader's scroll clamp and the `reader_width` used to size pre-fetched
 image art both do this, so they stay correct as the padding changes.
 
+**Article titles wrap** (TASK-13). Each article is one multi-line `ListItem`: `wrap_title()` word-wraps
+the full title to the pane's current inner width (`block.inner(area).width`, recomputed each draw so a
+resize reflows; hard-breaks any word wider than the line; widths via `unicode-width` so wrapped lines
+don't overflow). Items render contiguously (no inter-item blank line — removed by request). Because a
+whole article is one item, `List` keeps navigation per-article and highlights the entire wrapped item
+(it applies `highlight_style` across the full item height) — so `↑`/`↓` still step article-by-article,
+never line-by-line.
+
 ### Keybindings
 
 | Key(s) | Action |
@@ -226,6 +234,7 @@ redraw.
 | `dirs` | Home directory for the XDG fallback. |
 | `image` (`png, jpeg, gif, webp`) | Decode entry images for half-block rendering. |
 | `shlex` | Quote-safe splitting of the browser command template. |
+| `unicode-width` | Display-width-correct wrapping of article titles (`wrap_title`). |
 | `anyhow` | Error context throughout. |
 | `mockito` (dev) | Local HTTP mock server for client tests. |
 
