@@ -1,11 +1,11 @@
 ---
 id: TASK-12
 title: 'Add inner padding to the sources, articles, and reader panes'
-status: In Progress
+status: Done
 assignee:
   - '@ross'
 created_date: '2026-06-29 19:59'
-updated_date: '2026-06-29 20:54'
+updated_date: '2026-06-29 20:58'
 labels:
   - rust
   - ui
@@ -46,3 +46,9 @@ Implemented via a single Padding::uniform(1) on the shared column_block() — 1 
 
 Refinement (user feedback): reduce top/bottom inset by 50%. Terminal padding is whole-cell only, so halving 1→0.5 isn't representable; dropped top/bottom to 0, keeping the one-cell horizontal padding (Padding::horizontal(1)). Updated regression test (content now starts on row 1, just below the top border) and docs/architecture.md. fmt + clippy clean; 55 tests pass, stable 10/10.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Added consistent horizontal padding to all three TUI panes via the shared column_block() (Padding::horizontal(1)), so content no longer sits flush against the borders. Per review the top/bottom inset was dropped to 0 (terminal padding is whole-cell only, so a 50% reduction of one cell rounds to none). Reworked the reader's wrapped-height scroll clamp and the pre-fetch reader_width to derive geometry from block.inner(area) — which accounts for border AND padding — instead of a hardcoded area-2, so both stay correct as padding changes. Body-text line spacing is unchanged. Verified: cargo fmt --check, clippy --all-targets -D warnings, 55 tests pass (incl. new regression test panes_inset_content_from_their_borders), stable 10/10, CI green on the branch. docs/architecture.md updated in the same commits.
+<!-- SECTION:FINAL_SUMMARY:END -->
