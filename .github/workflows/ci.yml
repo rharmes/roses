@@ -1,0 +1,49 @@
+name: CI
+
+# Keep the codebase healthy from the first commit: formatting, linting (with
+# warnings denied), and tests must pass on every push and pull request.
+on:
+  push:
+  pull_request:
+
+# Least privilege — CI only needs to read the repository.
+permissions:
+  contents: read
+
+# A newer push to the same ref cancels the in-flight run, saving CI minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v7
+
+      # rust-toolchain.toml pins channel = "stable" with the rustfmt + clippy
+      # components; install exactly that so CI builds roses identically to a
+      # developer's machine. (If the pin ever moves to a fixed version, update
+      # the channel here to match — see docs/ci.md.)
+      - name: Install the pinned Rust toolchain (stable + rustfmt, clippy)
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+          rustup default stable
+
+      # Cache the cargo registry, git index, and target/ directory keyed on the
+      # toolchain + Cargo.lock, so green builds don't recompile the world.
+      - name: Cache cargo registry and build output
+        uses: Swatinem/rust-cache@v2
+
+      - name: Formatting — cargo fmt --check
+        run: cargo fmt --all --check
+
+      - name: Lint — cargo clippy (warnings denied)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Tests — cargo test
+        run: cargo test --locked

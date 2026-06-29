@@ -1,5 +1,8 @@
-- **Work in branches; never commit to main.** Commit as you work, but aim to land a single pull request
-  with all the changes and tests for a complete feature or change. 
+- **Do main-agent work in this checkout, on a branch — never in a worktree, never on `main`.**
+  Edit directly in `/Users/ross/Documents/roses/` (a worktree would hide changes from the working copy
+  the user is running; subagents may still isolate). **Commit *and* push as you go.** Aim to land a
+  single pull request with all the changes and tests for a complete feature or change — and **ask before
+  opening the PR.**
 - **Credentials never live in the repo.** Keep a defensive `.gitignore` entry for the config filename 
   in case a copy strays in.
 - **Very low tolerance for flaky tests.** A test that passes only *sometimes* is a defect — in the
@@ -14,6 +17,24 @@
   and conventions (CI, package manager, shell, deploy) — the reasoning, not only working code.
 - **Suggest guardrails when a pattern emerges.** If the same kind of command keeps coming up,
   suggest a permission allow-rule or a small wrapper script to remove the repeated prompt.
+
+## Development
+
+`roses` is a Rust binary crate (edition 2024). The toolchain is pinned in
+`rust-toolchain.toml`; rustup puts these commands on your PATH:
+
+- `cargo run` — build and run the app
+- `cargo build` (`--release` for optimized) — compile
+- `cargo test` — run tests
+- `cargo fmt` — format; `cargo clippy` — lint
+
+CI mirrors these: every push and PR must pass `cargo fmt --all --check`,
+`cargo clippy --all-targets -- -D warnings`, and `cargo test --locked`. Run
+those three before pushing — see `docs/ci.md` for the pipeline walkthrough.
+
+Source layout under `src/`: `config` (settings + keychain credentials),
+`feedbin` (Feedbin API client), `ui` (output — stdout now, ratatui later).
+Stack rationale and the build-out plan live in `docs/tui_research.md`.
 
 <!-- BACKLOG.MD GUIDELINES START -->
 <CRITICAL_INSTRUCTION>

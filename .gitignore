@@ -1,3 +1,9 @@
 .nova
 .DS_Store
 .claude/
+
+# Rust build artifacts
+/target
+
+# Defensive: the real config lives in ~/.config/roses, never the repo
+config.toml
