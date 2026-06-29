@@ -746,13 +746,13 @@ fn footer_help() -> Line<'static> {
 /// light→deep rose over a green stem, with a caption beneath. Degrades to just the
 /// centered caption when the area is too small for the art.
 fn draw_caught_up(frame: &mut Frame, area: Rect) {
-    const ART: [&str; 8] = [
-        "   ___   ",
-        "  (   )  ",
-        " ( (@) ) ",
-        "  )   (  ",
-        "   '-'   ",
-        "    |    ",
+    // Each row is padded to one width so centering keeps the bloom symmetric.
+    const ART: [&str; 7] = [
+        "  .---.  ",
+        " / .-. \\ ",
+        "| ( @ ) |",
+        " \\ `-' / ",
+        "  `---'  ",
         "   \\|/   ",
         "    |    ",
     ];
