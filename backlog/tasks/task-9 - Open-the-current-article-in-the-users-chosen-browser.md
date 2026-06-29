@@ -1,11 +1,11 @@
 ---
 id: TASK-9
 title: Open the current article in the user's chosen browser
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-06-29 00:56'
-updated_date: '2026-06-29 17:15'
+updated_date: '2026-06-29 19:47'
 labels:
   - rust
   - feature
@@ -25,9 +25,9 @@ Let the user open the full article in a browser of their choice: a GUI browser (
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A keybinding opens the selected entry URL in the default browser (macOS open / Linux xdg-open)
+- [x] #1 A keybinding opens the selected entry URL in the default browser (macOS open / Linux xdg-open)
 - [x] #2 A config setting and the BROWSER env var allow choosing a specific GUI or CLI browser
-- [ ] #3 Launching a terminal browser suspends and restores the ratatui screen and raw mode cleanly
+- [x] #3 Launching a terminal browser suspends and restores the ratatui screen and raw mode cleanly
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -41,3 +41,9 @@ Let the user open the full article in a browser of their choice: a GUI browser (
 <!-- SECTION:NOTES:BEGIN -->
 Implemented. src/browser.rs: pure resolve(pref, $BROWSER, url) -> Launch (precedence config browser template > $BROWSER > platform open/xdg-open; shlex-split; %s/{url} substitute or append) + run() (spawn GUI / status+wait terminal). config.rs: browser + browser_terminal settings, BrowserPref, load_browser_pref(); login/logout merge settings so the browser pref survives a re-login/logout. tui.rs: 'o' opens selected_url(); terminal browsers suspend (disable_raw_mode + LeaveAlternateScreen) -> run+wait -> restore (enable_raw_mode + EnterAlternateScreen + clear); GUI browsers spawn; footer 'o open'; notice on no-URL/failure. dep: shlex. 8 browser unit tests (precedence, %s/{url}, quoted args, env list). 42 tests total, stable 10x, green CI. AC#2 (config + $BROWSER choose a browser) test-backed and checked. AC#1 (keybinding opens default browser) and AC#3 (terminal-browser suspend/restore) need a live terminal to confirm the actual launch + screen restore.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Open the current article in the user's chosen browser. src/browser.rs: pure resolve() picks the invocation (precedence config 'browser' template > $BROWSER > platform open/xdg-open; shlex-split; %s/{url} substitute or append) + run() (spawn GUI / status+wait terminal). config.rs: browser + browser_terminal settings + load_browser_pref(); login/logout merge settings so the pref survives. tui.rs: 'o' opens the selected article's URL; a terminal browser suspends the TUI (disable raw mode + LeaveAlternateScreen), runs+waits, then restores (enable raw mode + EnterAlternateScreen + clear); GUI browsers spawn. dep: shlex. Verified: fmt, clippy -D warnings, 8 resolution tests; user live-verified opening in a browser and the TUI suspending/restoring cleanly around w3m. All ACs met.
+<!-- SECTION:FINAL_SUMMARY:END -->
