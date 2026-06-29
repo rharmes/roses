@@ -760,14 +760,15 @@ fn draw_caught_up(frame: &mut Frame, area: Rect) {
         "   \\|/   ",
         "    |    ",
     ];
-    const CAPTION: &str = "All caught up.";
+    const CAPTION: &str = "All caught up";
     /// The first rows are the bloom (rose gradient); the rest are the stem/leaf.
     const PETAL_ROWS: usize = 5;
 
     let art_w = ART
         .iter()
         .map(|line| UnicodeWidthStr::width(*line))
-        .chain(std::iter::once(UnicodeWidthStr::width(CAPTION)))
+        // The caption is nudged one cell right (two leading spaces, below).
+        .chain(std::iter::once(UnicodeWidthStr::width(CAPTION) + 2))
         .max()
         .unwrap_or(0) as u16;
     let art_h = ART.len() as u16 + 2; // blank spacer + caption
@@ -798,7 +799,9 @@ fn draw_caught_up(frame: &mut Frame, area: Rect) {
         })
         .collect();
     lines.push(Line::from(""));
-    lines.push(Line::from(CAPTION));
+    // Two leading spaces nudge the centered caption exactly one column right at any
+    // width (one space only shifts it at even widths).
+    lines.push(Line::from(format!("  {CAPTION}")));
 
     let [band] = Layout::vertical([Constraint::Length(art_h)])
         .flex(Flex::Center)
