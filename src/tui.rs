@@ -7,7 +7,7 @@
 //! columns. Feedbin is queried on a background `tokio::spawn_blocking` task so
 //! input never blocks; results arrive over a channel drained each tick.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -31,6 +31,8 @@ const READER_PAGE: u16 = 10;
 /// How long to wait for input before redrawing (also bounds how quickly a
 /// finished background task shows up).
 const TICK: Duration = Duration::from_millis(100);
+/// Cap on simultaneous image fetches so pre-fetching stays polite to hosts.
+const MAX_IMAGE_FETCHES: usize = 6;
 
 /// A fully-loaded snapshot from Feedbin.
 struct Loaded {
@@ -120,6 +122,8 @@ struct App {
     reader_scroll: u16,
     /// Rendered/loading entry images, keyed by source URL (TASK-8).
     images: HashMap<String, ImageState>,
+    /// Image URLs awaiting a fetch slot, in priority order (pre-fetch queue).
+    image_queue: VecDeque<String>,
     /// Inner width of the reader pane from the last draw, used to size images.
     reader_width: u16,
     /// Marked-read entries that can be restored, most recent last.
@@ -141,6 +145,7 @@ impl App {
             selected_article: None,
             reader_scroll: 0,
             images: HashMap::new(),
+            image_queue: VecDeque::new(),
             reader_width: 0,
             undo_stack: Vec::new(),
             notice: None,
@@ -200,34 +205,75 @@ impl App {
         self.selected_article_entry().and_then(|e| e.url.clone())
     }
 
-    /// Image URLs in the selected article that aren't cached yet, marking each
-    /// as `Loading` so it is only fetched once.
-    fn take_pending_images(&mut self) -> Vec<String> {
-        let urls: Vec<String> = {
-            let Some(entry) = self.selected_article_entry() else {
-                return Vec::new();
+    /// Image URLs in one article's body, in document order.
+    fn article_image_urls(&self, entry: &Entry) -> Vec<String> {
+        let body = entry
+            .content
+            .as_deref()
+            .or(entry.summary.as_deref())
+            .unwrap_or("");
+        content_blocks(body)
+            .into_iter()
+            .filter_map(|block| match block {
+                Segment::Image(url) => Some(url),
+                Segment::Text(_) => None,
+            })
+            .collect()
+    }
+
+    /// Enqueue every not-yet-seen image across all loaded articles for
+    /// background pre-fetch, marking each `Loading` so it is fetched once. The
+    /// selected article's images go first so it's ready soonest.
+    fn refill_image_queue(&mut self) {
+        let mut ordered: Vec<i64> = self.selected_article.into_iter().collect();
+        ordered.extend(
+            self.entries
+                .iter()
+                .map(|e| e.id)
+                .filter(|id| Some(*id) != self.selected_article),
+        );
+        for id in ordered {
+            let Some(entry) = self.entries.iter().find(|e| e.id == id) else {
+                continue;
             };
-            let body = entry
-                .content
-                .as_deref()
-                .or(entry.summary.as_deref())
-                .unwrap_or("");
-            content_blocks(body)
-                .into_iter()
-                .filter_map(|block| match block {
-                    Segment::Image(url) => Some(url),
-                    Segment::Text(_) => None,
-                })
-                .collect()
-        };
-        let mut pending = Vec::new();
-        for url in urls {
-            if !self.images.contains_key(&url) {
-                self.images.insert(url.clone(), ImageState::Loading);
-                pending.push(url);
+            for url in self.article_image_urls(entry) {
+                if !self.images.contains_key(&url) {
+                    self.images.insert(url.clone(), ImageState::Loading);
+                    self.image_queue.push_back(url);
+                }
             }
         }
-        pending
+    }
+
+    /// Move the selected article's queued images to the front so navigating to
+    /// an article fetches its images next.
+    fn prioritize_images(&mut self) {
+        if self.image_queue.is_empty() {
+            return;
+        }
+        let Some(entry) = self.selected_article_entry() else {
+            return;
+        };
+        let wanted: HashSet<String> = self.article_image_urls(entry).into_iter().collect();
+        if wanted.is_empty() {
+            return;
+        }
+        let mut front = VecDeque::with_capacity(self.image_queue.len());
+        let mut rest = Vec::new();
+        for url in self.image_queue.drain(..) {
+            if wanted.contains(&url) {
+                front.push_back(url);
+            } else {
+                rest.push(url);
+            }
+        }
+        front.extend(rest);
+        self.image_queue = front;
+    }
+
+    /// Pop the next image URL to fetch (already marked `Loading`).
+    fn next_queued_image(&mut self) -> Option<String> {
+        self.image_queue.pop_front()
     }
 
     fn source_index(&self) -> Option<usize> {
@@ -254,6 +300,7 @@ impl App {
                 self.undo_stack.clear();
                 self.notice = None;
                 self.reset_selection();
+                self.refill_image_queue();
             }
             Msg::Loaded(Err(err)) => self.status = Status::Failed(err),
 
@@ -501,6 +548,10 @@ impl App {
         ])
         .areas(main);
 
+        // Record the reader's content width every frame so background image
+        // pre-fetches size their art to fit even before the reader is opened.
+        self.reader_width = reader.width.saturating_sub(2);
+
         self.draw_sources(frame, sources);
         self.draw_articles(frame, articles);
         self.draw_reader(frame, reader);
@@ -611,8 +662,6 @@ impl App {
         let text = reader_text(entry, self.feed_name(entry.feed_id), &self.images);
         let inner_width = area.width.saturating_sub(2);
         let inner_height = area.height.saturating_sub(2);
-        // Remember the content width so background image fetches size art to fit.
-        self.reader_width = inner_width;
 
         // Clamp scroll to the *wrapped* height (not the raw line count): one long
         // paragraph is a single line that word-wraps to many rows, so clamping on
@@ -977,20 +1026,31 @@ fn run_loop(
     browser_pref: &BrowserPref,
 ) -> Result<()> {
     let mut app = App::new();
+    let mut images_in_flight = 0usize;
+    let mut last_selected = None;
     while !app.should_quit {
         while let Ok(msg) = rx.try_recv() {
+            if matches!(msg, Msg::Image { .. }) {
+                images_in_flight = images_in_flight.saturating_sub(1);
+            }
             app.apply(msg);
         }
         terminal
             .draw(|frame| app.draw(frame))
             .context("drawing the UI")?;
 
-        // Fetch images for the article currently on screen (reader visible).
-        if matches!(app.focus, Focus::Articles | Focus::Reader) {
-            let width = app.reader_width;
-            for url in app.take_pending_images() {
-                spawn_image(handle, tx, url, width);
-            }
+        // Pre-fetch images in the background: prioritize the article in view,
+        // then drain the queue up to the concurrency cap.
+        if app.selected_article != last_selected {
+            last_selected = app.selected_article;
+            app.prioritize_images();
+        }
+        while images_in_flight < MAX_IMAGE_FETCHES {
+            let Some(url) = app.next_queued_image() else {
+                break;
+            };
+            images_in_flight += 1;
+            spawn_image(handle, tx, url, app.reader_width.max(1));
         }
 
         if event::poll(TICK).context("polling for input")?
@@ -1396,6 +1456,91 @@ mod tests {
         assert!(
             collect(&images).contains("image unavailable"),
             "graceful failure (AC #2)"
+        );
+    }
+
+    fn img_entry(id: i64, feed_id: i64, img_url: &str) -> Entry {
+        Entry {
+            id,
+            feed_id,
+            title: Some(format!("t{id}")),
+            url: None,
+            published: None,
+            summary: None,
+            content: Some(format!("<p>body</p><img src=\"{img_url}\">")),
+        }
+    }
+
+    #[test]
+    fn images_are_prefetched_for_all_articles_on_load() {
+        let mut feed_titles = HashMap::new();
+        feed_titles.insert(7, "Feed".to_string());
+        let no_image = Entry {
+            id: 3,
+            feed_id: 7,
+            title: Some("t3".to_string()),
+            url: None,
+            published: None,
+            summary: None,
+            content: Some("<p>no image</p>".to_string()),
+        };
+        let entries = vec![
+            img_entry(1, 7, "https://x/1.png"),
+            img_entry(2, 7, "https://x/2.png"),
+            no_image,
+        ];
+        let mut app = App::new();
+        app.apply(Msg::Loaded(Ok(Loaded {
+            entries,
+            feed_titles,
+            total_unread: 3,
+        })));
+        // Every article's image is queued proactively, not just the selected one.
+        assert_eq!(app.image_queue.len(), 2);
+        assert!(matches!(
+            app.images.get("https://x/1.png"),
+            Some(ImageState::Loading)
+        ));
+        assert!(matches!(
+            app.images.get("https://x/2.png"),
+            Some(ImageState::Loading)
+        ));
+    }
+
+    #[test]
+    fn next_queued_image_drains_the_queue() {
+        let mut feed_titles = HashMap::new();
+        feed_titles.insert(7, "Feed".to_string());
+        let mut app = App::new();
+        app.apply(Msg::Loaded(Ok(Loaded {
+            entries: vec![img_entry(1, 7, "https://x/1.png")],
+            feed_titles,
+            total_unread: 1,
+        })));
+        assert_eq!(app.next_queued_image().as_deref(), Some("https://x/1.png"));
+        assert!(app.next_queued_image().is_none());
+    }
+
+    #[test]
+    fn prioritize_moves_selected_articles_image_to_front() {
+        let mut feed_titles = HashMap::new();
+        feed_titles.insert(7, "Feed".to_string());
+        let entries = vec![
+            img_entry(1, 7, "https://x/1.png"),
+            img_entry(2, 7, "https://x/2.png"),
+            img_entry(3, 7, "https://x/3.png"),
+        ];
+        let mut app = App::new();
+        app.apply(Msg::Loaded(Ok(Loaded {
+            entries,
+            feed_titles,
+            total_unread: 3,
+        })));
+        app.selected_article = Some(2);
+        app.prioritize_images();
+        assert_eq!(
+            app.image_queue.front().map(String::as_str),
+            Some("https://x/2.png")
         );
     }
 
