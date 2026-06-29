@@ -1,11 +1,11 @@
 ---
 id: TASK-14
 title: 'Inject whimsy: color accents, an ASCII rose, and visual personality'
-status: In Progress
+status: Done
 assignee:
   - '@ross'
 created_date: '2026-06-29 20:00'
-updated_date: '2026-06-29 22:32'
+updated_date: '2026-06-29 23:42'
 labels:
   - rust
   - ui
@@ -52,3 +52,9 @@ Implemented per approved plan + the 4 taste choices. New src/theme.rs (rose pale
 
 Added 'roses preview' subcommand (user request): renders the all-caught-up rose offline — no login or network — so the empty state can be eyeballed without marking everything read. tui::run_preview() seeds Status::Ready + empty entries and runs a minimal draw loop that quits on q/Esc; wired into main.rs dispatch + usage. docs/architecture.md CLI dispatch updated. fmt+clippy clean, 66 tests, stable 10/10.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Added a cohesive, restrained rose personality to the TUI. New src/theme.rs holds the rose palette (truecolor Rgb: ROSE accent, ROSE_LIGHT/ROSE_DEEP gradient ramp, LEAF) plus a lerp() for the petal gradient. Chrome-only accent (kept restrained): the focused pane's border + title (column_block), the selection bar (highlight = fg(ROSE).reversed() — renders as a rose bar and keeps the REVERSED modifier), the reader title, and the footer's keys including the arrow glyphs (footer_help); feed names, article titles, body, etc. stay neutral. When everything is read (Status::Ready + no entries), draw() short-circuits to draw_caught_up(): a vertically-centered spiral-bloom ASCII rose with petals graded light->deep over a green stem and a centered 'All caught up' caption in the default text color; the footer is always drawn and the art degrades to just the caption on tiny terminals. Loading/Failed states are unchanged. Also added a 'roses preview' subcommand (tui::run_preview) that renders the caught-up screen offline (no login/network) so it can be eyeballed without marking everything read. Verified: cargo fmt --check, clippy --all-targets -D warnings, 66 tests (theme lerp unit test + accent/footer/all-caught-up/loading-unchanged/tiny-fallback render tests; the existing REVERSED-selection and footer 'quit' tests still pass), stable 10/10, CI green. docs/architecture.md updated (theme module + Theme & whimsy section + preview in CLI dispatch). Out of scope per the chosen design: rounded borders, animated spinner, theme-config/256-color fallback.
+<!-- SECTION:FINAL_SUMMARY:END -->
