@@ -19,6 +19,7 @@ use ratatui::widgets::{Block, List, ListItem, ListState, Padding, Paragraph, Wra
 use ratatui::{DefaultTerminal, Frame};
 use tokio::runtime::Handle;
 use tokio::sync::mpsc::{self, UnboundedSender};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::browser;
 use crate::config::BrowserPref;
@@ -638,13 +639,28 @@ impl App {
             frame.render_widget(Paragraph::new("").block(block), area);
             return;
         };
+        // Wrap each title to the pane's current inner width (recomputed every draw,
+        // so resizes reflow) and append a trailing blank line as the inter-item
+        // gap. Each article is one multi-line `ListItem`, so navigation and the
+        // selection highlight stay per-article — `List` highlights the whole item
+        // (TASK-13).
+        let width = block.inner(area).width;
         let items: Vec<ListItem> = self
             .articles(feed_id)
             .iter()
             .map(|e| {
-                ListItem::new(Line::from(
-                    e.title.as_deref().unwrap_or("(untitled)").to_string(),
-                ))
+                let title = e
+                    .title
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+                    .unwrap_or("(untitled)");
+                let mut lines: Vec<Line> = wrap_title(title, width)
+                    .into_iter()
+                    .map(Line::from)
+                    .collect();
+                lines.push(Line::from(""));
+                ListItem::new(Text::from(lines))
             })
             .collect();
         let list = List::new(items)
@@ -692,6 +708,52 @@ impl App {
             .scroll((self.reader_scroll, 0));
         frame.render_widget(reader, area);
     }
+}
+
+/// Word-wrap `text` to `width` display columns for the articles list, breaking on
+/// whitespace and hard-splitting any single word wider than the line. Widths use
+/// Unicode display width (matching how the terminal measures cells), so wrapped
+/// lines don't overflow and get truncated. Always returns at least one line.
+fn wrap_title(text: &str, width: u16) -> Vec<String> {
+    let width = usize::from(width.max(1));
+    let mut lines: Vec<String> = Vec::new();
+    let mut line = String::new();
+    let mut line_width = 0usize;
+    for word in text.split_whitespace() {
+        let word_width = UnicodeWidthStr::width(word);
+        // A word too wide for any line: flush, then emit it in width-sized pieces.
+        if word_width > width {
+            if line_width > 0 {
+                lines.push(std::mem::take(&mut line));
+                line_width = 0;
+            }
+            for ch in word.chars() {
+                let char_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+                if line_width + char_width > width && line_width > 0 {
+                    lines.push(std::mem::take(&mut line));
+                    line_width = 0;
+                }
+                line.push(ch);
+                line_width += char_width;
+            }
+            continue;
+        }
+        let separator = usize::from(line_width > 0);
+        if line_width + separator + word_width > width {
+            lines.push(std::mem::take(&mut line));
+            line_width = 0;
+        }
+        if line_width > 0 {
+            line.push(' ');
+            line_width += 1;
+        }
+        line.push_str(word);
+        line_width += word_width;
+    }
+    if line_width > 0 || lines.is_empty() {
+        lines.push(line);
+    }
+    lines
 }
 
 /// Build the reader pane's content for one entry: a title/feed/url header, then
@@ -1700,5 +1762,117 @@ mod tests {
             !rendered.contains("Body"),
             "reader empty while on a source: {rendered:?}"
         );
+    }
+
+    #[test]
+    fn wrap_title_keeps_short_titles_on_one_line() {
+        assert_eq!(wrap_title("Hello world", 40), vec!["Hello world"]);
+    }
+
+    #[test]
+    fn wrap_title_wraps_on_whitespace_within_width() {
+        let lines = wrap_title("Hello World Foo", 10);
+        assert!(lines.len() >= 2, "a long title wraps: {lines:?}");
+        for line in &lines {
+            assert!(
+                UnicodeWidthStr::width(line.as_str()) <= 10,
+                "each wrapped line fits the width: {line:?}"
+            );
+        }
+        // Every word is preserved, in order (nothing truncated).
+        assert_eq!(lines.join(" "), "Hello World Foo");
+    }
+
+    #[test]
+    fn wrap_title_hard_breaks_a_word_wider_than_the_line() {
+        assert_eq!(wrap_title("abcdefghij", 4), vec!["abcd", "efgh", "ij"]);
+    }
+
+    #[test]
+    fn wrap_title_is_never_empty_and_guards_zero_width() {
+        assert_eq!(wrap_title("", 10), vec![String::new()]);
+        // width 0 is clamped to 1 — must not loop forever.
+        assert_eq!(wrap_title("ab", 0), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn article_titles_wrap_space_apart_and_highlight_whole_item() {
+        // Two articles in one source; the oldest (selected) has a title that must
+        // wrap at the narrow pane width.
+        let mut feed_titles = HashMap::new();
+        feed_titles.insert(9, "Feed".to_string());
+        let mk = |id: i64, title: &str, published: &str| Entry {
+            id,
+            feed_id: 9,
+            title: Some(title.to_string()),
+            url: None,
+            published: Some(published.to_string()),
+            summary: None,
+            content: None,
+        };
+        // Stored newest-first, as load() produces; the column shows oldest-first.
+        let entries = vec![
+            mk(2, "Second", "2026-02-01T00:00:00Z"),
+            mk(1, "Alpha Bravo", "2026-01-01T00:00:00Z"),
+        ];
+        let mut app = App::new();
+        app.apply(Msg::Loaded(Ok(Loaded {
+            entries,
+            feed_titles,
+            total_unread: 2,
+        })));
+        app.focus_right(); // focus Articles; the oldest article (id 1) is selected
+        assert_eq!(app.selected_article, Some(1));
+
+        // Width 40: Articles pane is x∈[10,24); inner content is cols [12,22),
+        // 10 wide, starting at row 1 (no top inset). "Alpha Bravo" wraps to two
+        // lines at width 10.
+        let backend = ratatui::backend::TestBackend::new(40, 20);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let content = |y: u16| {
+            (12u16..22)
+                .map(|x| buffer.cell((x, y)).unwrap().symbol())
+                .collect::<String>()
+        };
+
+        // The selected title's wrapped lines are the leading non-blank rows.
+        let mut title_rows = Vec::new();
+        let mut y = 1u16;
+        while y < 18 && !content(y).trim().is_empty() {
+            title_rows.push(y);
+            y += 1;
+        }
+        assert!(
+            title_rows.len() >= 2,
+            "the long title wrapped onto multiple lines, got rows {title_rows:?}"
+        );
+        // The full title is visible across those lines — no truncation (AC#1).
+        let joined = title_rows
+            .iter()
+            .map(|&r| content(r).trim().to_string())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(joined, "Alpha Bravo");
+        // A blank line separates this item from the next (AC#2)…
+        assert_eq!(content(y).trim(), "", "blank gap row after the item");
+        // …and the next article follows after the gap.
+        assert!(
+            content(y + 1).starts_with("Second"),
+            "next item after the gap: {:?}",
+            content(y + 1)
+        );
+        // The selection highlight covers every wrapped line of the item (AC#3).
+        for &r in &title_rows {
+            assert!(
+                buffer
+                    .cell((12, r))
+                    .unwrap()
+                    .modifier
+                    .contains(ratatui::style::Modifier::REVERSED),
+                "selected item highlighted on wrapped row {r}"
+            );
+        }
     }
 }

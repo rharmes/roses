@@ -2415,6 +2415,7 @@ dependencies = [
  "shlex",
  "tokio",
  "toml",
+ "unicode-width",
 ]
 
 [[package]]

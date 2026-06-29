@@ -19,6 +19,7 @@ serde = { version = "1.0.228", features = ["derive"] }
 shlex = "2.0.1"
 tokio = { version = "1.52.3", default-features = false, features = ["rt", "sync"] }
 toml = "1.1.2"
+unicode-width = "0.2.2"
 
 [dev-dependencies]
 mockito = "1.7.2"
