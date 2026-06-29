@@ -17,8 +17,7 @@ const APP_NAME: &str = "roses";
 #[derive(Debug, Clone)]
 pub struct Credentials {
     pub email: String,
-    /// Sent as the HTTP Basic auth password by the Feedbin client (TASK-3).
-    #[allow(dead_code)]
+    /// Sent as the HTTP Basic auth password by the Feedbin client.
     pub password: String,
 }
 

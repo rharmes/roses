@@ -31,9 +31,19 @@ fn main() -> Result<()> {
         }
     };
 
+    let client = feedbin::Client::new(&credentials)?;
+    client.authenticate()?;
+    println!("Authenticated with Feedbin as {}.", credentials.email);
+
+    let unread = client.unread_entry_ids()?;
+    println!("{} unread entries.", unread.len());
+
+    // Hydrate a small batch as a smoke test; rich rendering arrives in TASK-4.
+    let batch: Vec<i64> = unread.iter().copied().take(20).collect();
+    let entries = client.entries(&batch)?;
     println!(
-        "Ready to fetch entries for {} (next: TASK-3).",
-        credentials.email
+        "Fetched {} entries (display lands in TASK-4).",
+        entries.len()
     );
     Ok(())
 }
