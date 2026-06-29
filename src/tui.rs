@@ -574,15 +574,15 @@ impl App {
         } else {
             Style::new().dim()
         };
-        // Inset the content from the border for breathing room (TASK-12): ~1 cell
-        // horizontally + a modest 1-row top/bottom inset, applied to every pane via
-        // this shared block so the padding stays consistent. `draw_reader` derives
-        // its scroll bounds from `block.inner(area)`, so this padding is accounted
-        // for there automatically.
+        // Inset the content from the border for breathing room (TASK-12): one cell
+        // of horizontal padding, no top/bottom inset, applied to every pane via this
+        // shared block so the padding stays consistent. `draw_reader` derives its
+        // scroll bounds from `block.inner(area)`, so this padding is accounted for
+        // there automatically.
         Block::bordered()
             .title(title)
             .border_style(border)
-            .padding(Padding::uniform(1))
+            .padding(Padding::horizontal(1))
     }
 
     /// Reversed text marks the active cursor; a bold row marks the remembered
@@ -1647,8 +1647,8 @@ mod tests {
     #[test]
     fn panes_inset_content_from_their_borders() {
         // TASK-12: every pane insets its content one cell from the left border
-        // (horizontal padding) and one row below the top border (top inset),
-        // applied consistently through the shared column block.
+        // (horizontal padding), with no top/bottom inset, applied consistently
+        // through the shared column block.
         let mut app = app_with(&[(9, "Hacker News", 2)]);
         app.focus_right(); // focus Articles so the reader also shows a body
         let backend = ratatui::backend::TestBackend::new(120, 20);
@@ -1658,30 +1658,26 @@ mod tests {
         let sym = |x: u16, y: u16| buffer.cell((x, y)).unwrap().symbol().to_string();
 
         // Left borders: Sources at x=0, Articles at x=30 (25% of 120), Reader at
-        // x=72 (25%+35%). Content is inset border(1) + padding(1) = 2 cells in,
-        // and one row down from the top border.
+        // x=72 (25%+35%). With one cell of horizontal padding and no top inset,
+        // content starts at column border(1)+padding(1)=2, on the first row below
+        // the top border (row 1).
         for left in [0u16, 30, 72] {
             let content = left + 2;
             assert_eq!(
-                sym(content, 1),
-                " ",
-                "top inset: row 1 is blank at column {content}"
-            );
-            assert_eq!(
-                sym(left + 1, 2),
+                sym(left + 1, 1),
                 " ",
                 "left padding: blank cell before content at column {}",
                 left + 1
             );
             assert_ne!(
-                sym(content, 2),
+                sym(content, 1),
                 " ",
-                "content is present, inset from the border at column {content}"
+                "content is present on row 1, inset from the border at column {content}"
             );
         }
 
         // Spot-check the inset text itself in the Sources pane.
-        let name: String = (2..13).map(|x| sym(x, 2)).collect();
+        let name: String = (2..13).map(|x| sym(x, 1)).collect();
         assert_eq!(name, "Hacker News", "source name inset by border + padding");
     }
 

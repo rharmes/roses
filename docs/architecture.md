@@ -120,12 +120,12 @@ so it survives entries being added/removed by mark/undo. `ListState` indices are
 those ids. Display order: **sources by feed name**; **articles oldest-first** (`articles()` reverses the
 newest-first `entries`).
 
-All three panes share `column_block()`, which adds a `Padding::uniform(1)` inset (TASK-12) so content
-doesn't sit flush against the border — one cell of horizontal breathing room plus a one-row top/bottom
-inset, consistent across the columns. Because the padding lives on the shared block, any geometry that
-needs the true content rect derives it from `block.inner(area)` (which accounts for border **and**
-padding) rather than a hardcoded `area − 2`: the reader's scroll clamp and the `reader_width` used to
-size pre-fetched image art both do this, so they stay correct as the padding changes.
+All three panes share `column_block()`, which adds a `Padding::horizontal(1)` inset (TASK-12) so content
+doesn't sit flush against the border — one cell of horizontal breathing room (no top/bottom inset),
+consistent across the columns. Because the padding lives on the shared block, any geometry that needs the
+true content rect derives it from `block.inner(area)` (which accounts for border **and** padding) rather
+than a hardcoded `area − 2`: the reader's scroll clamp and the `reader_width` used to size pre-fetched
+image art both do this, so they stay correct as the padding changes.
 
 ### Keybindings
 

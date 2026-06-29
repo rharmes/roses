@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@ross'
 created_date: '2026-06-29 19:59'
-updated_date: '2026-06-29 20:42'
+updated_date: '2026-06-29 20:54'
 labels:
   - rust
   - ui
@@ -43,4 +43,6 @@ The three TUI panes render text flush against their borders. Add a small inner m
 
 <!-- SECTION:NOTES:BEGIN -->
 Implemented via a single Padding::uniform(1) on the shared column_block() — 1 cell horizontal + a 1-row top/bottom inset, applied to all three panes (AC#1, AC#3). Body text keeps single-line spacing; padding only insets the content rect (AC#2). Fixed draw_reader's scroll-clamp + draw()'s reader_width to derive geometry from block.inner(area) (border + padding) instead of hardcoded area-2, so scroll bounds and pre-fetched image width stay correct under padding. Added regression test panes_inset_content_from_their_borders (verifies the inset at the exact border/padding/content columns of all three panes). fmt + clippy -D warnings clean; 55 tests pass, stable 10/10. Updated docs/architecture.md (layout + reader-scroll notes).
+
+Refinement (user feedback): reduce top/bottom inset by 50%. Terminal padding is whole-cell only, so halving 1→0.5 isn't representable; dropped top/bottom to 0, keeping the one-cell horizontal padding (Padding::horizontal(1)). Updated regression test (content now starts on row 1, just below the top border) and docs/architecture.md. fmt + clippy clean; 55 tests pass, stable 10/10.
 <!-- SECTION:NOTES:END -->
