@@ -64,6 +64,24 @@ enum Msg {
         index: usize,
         result: Result<(), String>,
     },
+    /// Rendered half-block art for an entry image, keyed by its source URL.
+    Image {
+        url: String,
+        result: Result<Vec<Line<'static>>, String>,
+    },
+}
+
+/// Cache state for one entry image (TASK-8).
+enum ImageState {
+    Loading,
+    Ready(Vec<Line<'static>>),
+    Failed,
+}
+
+/// A piece of reader content in document order: a run of text, or an image.
+enum Segment {
+    Text(String),
+    Image(String),
 }
 
 /// What a keypress asks the run loop to do beyond mutating `App`.
@@ -100,6 +118,10 @@ struct App {
     selected_source: Option<i64>,
     selected_article: Option<i64>,
     reader_scroll: u16,
+    /// Rendered/loading entry images, keyed by source URL (TASK-8).
+    images: HashMap<String, ImageState>,
+    /// Inner width of the reader pane from the last draw, used to size images.
+    reader_width: u16,
     /// Marked-read entries that can be restored, most recent last.
     undo_stack: Vec<Undone>,
     /// Transient status line (e.g. a write failure); cleared on the next key.
@@ -118,6 +140,8 @@ impl App {
             selected_source: None,
             selected_article: None,
             reader_scroll: 0,
+            images: HashMap::new(),
+            reader_width: 0,
             undo_stack: Vec::new(),
             notice: None,
             should_quit: false,
@@ -176,6 +200,36 @@ impl App {
         self.selected_article_entry().and_then(|e| e.url.clone())
     }
 
+    /// Image URLs in the selected article that aren't cached yet, marking each
+    /// as `Loading` so it is only fetched once.
+    fn take_pending_images(&mut self) -> Vec<String> {
+        let urls: Vec<String> = {
+            let Some(entry) = self.selected_article_entry() else {
+                return Vec::new();
+            };
+            let body = entry
+                .content
+                .as_deref()
+                .or(entry.summary.as_deref())
+                .unwrap_or("");
+            content_blocks(body)
+                .into_iter()
+                .filter_map(|block| match block {
+                    Segment::Image(url) => Some(url),
+                    Segment::Text(_) => None,
+                })
+                .collect()
+        };
+        let mut pending = Vec::new();
+        for url in urls {
+            if !self.images.contains_key(&url) {
+                self.images.insert(url.clone(), ImageState::Loading);
+                pending.push(url);
+            }
+        }
+        pending
+    }
+
     fn source_index(&self) -> Option<usize> {
         let sel = self.selected_source?;
         self.sources().iter().position(|s| s.0 == sel)
@@ -232,6 +286,14 @@ impl App {
                     self.undo_stack.push(Undone { entry, index });
                     self.notice = Some(format!("Undo failed (kept read): {err}"));
                 }
+            }
+
+            Msg::Image { url, result } => {
+                let state = match result {
+                    Ok(lines) => ImageState::Ready(lines),
+                    Err(_) => ImageState::Failed,
+                };
+                self.images.insert(url, state);
             }
         }
     }
@@ -546,9 +608,11 @@ impl App {
             return;
         };
 
-        let text = reader_text(entry, self.feed_name(entry.feed_id));
+        let text = reader_text(entry, self.feed_name(entry.feed_id), &self.images);
         let inner_width = area.width.saturating_sub(2);
         let inner_height = area.height.saturating_sub(2);
+        // Remember the content width so background image fetches size art to fit.
+        self.reader_width = inner_width;
 
         // Clamp scroll to the *wrapped* height (not the raw line count): one long
         // paragraph is a single line that word-wraps to many rows, so clamping on
@@ -568,9 +632,10 @@ impl App {
     }
 }
 
-/// Build the reader pane's text for one entry: a title/feed/url header, then the
-/// body rendered from HTML to plain text.
-fn reader_text(entry: &Entry, feed: &str) -> Text<'static> {
+/// Build the reader pane's content for one entry: a title/feed/url header, then
+/// the body — text rendered from HTML, with images shown as half-block art (a
+/// placeholder while loading, a notice when unavailable).
+fn reader_text(entry: &Entry, feed: &str, images: &HashMap<String, ImageState>) -> Text<'static> {
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(
         entry
@@ -594,46 +659,41 @@ fn reader_text(entry: &Entry, feed: &str) -> Text<'static> {
         .as_deref()
         .or(entry.summary.as_deref())
         .unwrap_or("(no content)");
-    for line in html_to_text(body).lines() {
-        lines.push(Line::from(line.to_string()));
+    for block in content_blocks(body) {
+        match block {
+            Segment::Text(text) => {
+                for line in text.lines() {
+                    lines.push(Line::from(line.to_string()));
+                }
+            }
+            Segment::Image(url) => match images.get(&url) {
+                Some(ImageState::Ready(art)) => {
+                    lines.push(Line::from(""));
+                    lines.extend(art.iter().cloned());
+                    lines.push(Line::from(""));
+                }
+                Some(ImageState::Failed) => {
+                    lines.push(Line::from(format!("[image unavailable: {url}]")).dim());
+                }
+                _ => lines.push(Line::from(format!("[image loading… {url}]")).dim()),
+            },
+        }
     }
     Text::from(lines)
 }
 
-/// Convert entry HTML to plain text for the reader: drop tags, turn block-level
-/// tags into line breaks, decode common entities, and **strip control
-/// characters** so a hostile feed can't inject terminal escape sequences.
-fn html_to_text(html: &str) -> String {
-    let mut text = String::with_capacity(html.len());
-    let mut chars = html.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '<' {
-            let mut tag = String::new();
-            for n in chars.by_ref() {
-                if n == '>' {
-                    break;
-                }
-                tag.push(n);
-            }
-            if is_block_tag(&tag) {
-                text.push('\n');
-            }
-        } else {
-            text.push(c);
-        }
-    }
-    sanitize(&decode_entities(&text))
-}
-
-fn is_block_tag(tag: &str) -> bool {
-    let name = tag
-        .trim_start_matches('/')
+/// The lowercased tag name (e.g. `</P >` -> `p`).
+fn tag_name(tag: &str) -> String {
+    tag.trim_start_matches('/')
         .split([' ', '\t', '\n', '/'])
         .next()
         .unwrap_or("")
-        .to_ascii_lowercase();
+        .to_ascii_lowercase()
+}
+
+fn is_block_tag(tag: &str) -> bool {
     matches!(
-        name.as_str(),
+        tag_name(tag).as_str(),
         "p" | "br"
             | "div"
             | "li"
@@ -655,6 +715,84 @@ fn is_block_tag(tag: &str) -> bool {
             | "pre"
             | "table"
     )
+}
+
+/// Extract the `src` URL from an `<img …>` tag's inner text, ignoring lookalike
+/// attributes such as `srcset`. Returns `None` when there's no usable `src`.
+fn extract_img_src(tag: &str) -> Option<String> {
+    let lower = tag.to_ascii_lowercase();
+    let bytes = tag.as_bytes();
+    let mut from = 0;
+    while let Some(rel) = lower[from..].find("src") {
+        let pos = from + rel;
+        let boundary_ok = pos == 0 || !lower.as_bytes()[pos - 1].is_ascii_alphanumeric();
+        let mut i = pos + 3;
+        while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
+            i += 1;
+        }
+        if boundary_ok && i < bytes.len() && bytes[i] == b'=' {
+            let mut j = i + 1;
+            while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t') {
+                j += 1;
+            }
+            let value = &tag[j..];
+            let src = match value.chars().next() {
+                Some(quote @ ('"' | '\'')) => {
+                    let rest = &value[1..];
+                    let end = rest.find(quote).unwrap_or(rest.len());
+                    rest[..end].trim().to_string()
+                }
+                _ => {
+                    let end = value.find(char::is_whitespace).unwrap_or(value.len());
+                    value[..end].trim().to_string()
+                }
+            };
+            return (!src.is_empty()).then_some(src);
+        }
+        from = pos + 3;
+    }
+    None
+}
+
+/// Split entry HTML into ordered text/image segments for the reader. Text
+/// segments are tag-stripped, entity-decoded, and control-char-stripped (see
+/// [`sanitize`] / [`decode_entities`]); each `<img>` becomes a
+/// `Segment::Image(src)`.
+fn content_blocks(html: &str) -> Vec<Segment> {
+    fn flush(text: &mut String, blocks: &mut Vec<Segment>) {
+        let rendered = sanitize(&decode_entities(text));
+        if !rendered.is_empty() {
+            blocks.push(Segment::Text(rendered));
+        }
+        text.clear();
+    }
+
+    let mut blocks = Vec::new();
+    let mut text = String::new();
+    let mut chars = html.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '<' {
+            let mut tag = String::new();
+            for n in chars.by_ref() {
+                if n == '>' {
+                    break;
+                }
+                tag.push(n);
+            }
+            if tag_name(&tag) == "img" {
+                flush(&mut text, &mut blocks);
+                if let Some(src) = extract_img_src(&tag) {
+                    blocks.push(Segment::Image(src));
+                }
+            } else if is_block_tag(&tag) {
+                text.push('\n');
+            }
+        } else {
+            text.push(c);
+        }
+    }
+    flush(&mut text, &mut blocks);
+    blocks
 }
 
 fn decode_entities(s: &str) -> String {
@@ -780,6 +918,15 @@ fn spawn_write(
     });
 }
 
+/// Fetch + render an entry image on the blocking pool and deliver the result.
+fn spawn_image(handle: &Handle, tx: &UnboundedSender<Msg>, url: String, max_cols: u16) {
+    let tx = tx.clone();
+    handle.spawn_blocking(move || {
+        let result = crate::images::fetch_and_render(&url, max_cols).map_err(|e| format!("{e:#}"));
+        let _ = tx.send(Msg::Image { url, result });
+    });
+}
+
 /// Blocking fetch of the newest unread entries plus their feed names.
 fn load(client: &Client) -> Result<Loaded> {
     let mut unread = client.unread_entry_ids()?;
@@ -837,6 +984,14 @@ fn run_loop(
         terminal
             .draw(|frame| app.draw(frame))
             .context("drawing the UI")?;
+
+        // Fetch images for the article currently on screen (reader visible).
+        if matches!(app.focus, Focus::Articles | Focus::Reader) {
+            let width = app.reader_width;
+            for url in app.take_pending_images() {
+                spawn_image(handle, tx, url, width);
+            }
+        }
 
         if event::poll(TICK).context("polling for input")?
             && let Event::Key(key) = event::read().context("reading input")?
@@ -906,6 +1061,18 @@ fn suspend_and_run(terminal: &mut DefaultTerminal, launch: &browser::Launch) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Plain-text rendering of HTML via the content pipeline (test helper).
+    fn html_to_text(html: &str) -> String {
+        content_blocks(html)
+            .into_iter()
+            .filter_map(|segment| match segment {
+                Segment::Text(text) => Some(text),
+                Segment::Image(_) => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
 
     fn entry(id: i64, feed_id: i64, title: &str, content: Option<&str>) -> Entry {
         Entry {
@@ -1145,6 +1312,91 @@ mod tests {
         assert!(rendered.contains("Hacker News"), "source name shown");
         assert!(rendered.contains("Body"), "reader shows the article body");
         assert!(rendered.contains("quit"), "footer help shown");
+    }
+
+    #[test]
+    fn html_to_text_strips_tags_and_breaks_paragraphs() {
+        assert_eq!(html_to_text("a<br>b"), "a\nb");
+        assert_eq!(
+            html_to_text("<p>One <b>bold</b></p><p>Two</p>"),
+            "One bold\n\nTwo"
+        );
+    }
+
+    #[test]
+    fn html_to_text_decodes_entities() {
+        assert_eq!(
+            html_to_text("Tom &amp; Jerry &lt;3 &#39;hi&#39; &#x2764; &nbsp;end"),
+            "Tom & Jerry <3 'hi' ❤  end"
+        );
+    }
+
+    #[test]
+    fn html_to_text_strips_control_chars_blocking_escape_injection() {
+        let out = html_to_text("safe\u{1b}[31mtext");
+        assert!(
+            !out.contains('\u{1b}'),
+            "escape byte must be stripped: {out:?}"
+        );
+        assert!(out.contains("safe"));
+    }
+
+    #[test]
+    fn content_blocks_separate_images_from_text() {
+        let blocks =
+            content_blocks("<p>before</p><img src=\"https://x/i.png\" alt=\"a\"><p>after</p>");
+        assert_eq!(blocks.len(), 3);
+        assert!(matches!(&blocks[0], Segment::Text(t) if t == "before"));
+        assert!(matches!(&blocks[1], Segment::Image(u) if u == "https://x/i.png"));
+        assert!(matches!(&blocks[2], Segment::Text(t) if t == "after"));
+    }
+
+    #[test]
+    fn extract_img_src_handles_quotes_and_ignores_srcset() {
+        assert_eq!(
+            extract_img_src("img src=\"https://x/a.png\""),
+            Some("https://x/a.png".to_string())
+        );
+        assert_eq!(
+            extract_img_src("img src='https://x/b.png'"),
+            Some("https://x/b.png".to_string())
+        );
+        // `srcset` must not be mistaken for `src`.
+        assert_eq!(
+            extract_img_src("img srcset=\"https://x/s.png 2x\" src=\"https://x/real.png\""),
+            Some("https://x/real.png".to_string())
+        );
+        assert_eq!(extract_img_src("img alt=\"no source\""), None);
+    }
+
+    #[test]
+    fn reader_renders_image_placeholder_then_graceful_failure() {
+        let entry = Entry {
+            id: 1,
+            feed_id: 9,
+            title: Some("T".to_string()),
+            url: None,
+            published: None,
+            summary: None,
+            content: Some("<img src=\"https://x/i.png\">".to_string()),
+        };
+        let collect = |images: &HashMap<String, ImageState>| -> String {
+            reader_text(&entry, "Feed", images)
+                .lines
+                .iter()
+                .flat_map(|line| line.spans.iter().map(|span| span.content.to_string()))
+                .collect()
+        };
+        let mut images = HashMap::new();
+        assert!(
+            collect(&images).contains("image loading"),
+            "placeholder while loading"
+        );
+        images.insert("https://x/i.png".to_string(), ImageState::Failed);
+        assert!(
+            collect(&images).contains("image unavailable"),
+            "graceful failure (AC #2)"
+        );
     }
 
     #[test]
