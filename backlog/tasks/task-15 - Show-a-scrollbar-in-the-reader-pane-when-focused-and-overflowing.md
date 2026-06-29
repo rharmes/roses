@@ -1,0 +1,46 @@
+---
+id: TASK-15
+title: Show a scrollbar in the reader pane when focused and overflowing
+status: In Progress
+assignee:
+  - '@ross'
+created_date: '2026-06-29 23:31'
+updated_date: '2026-06-29 23:36'
+labels:
+  - rust
+  - ui
+dependencies:
+  - TASK-11
+ordinal: 1014
+---
+
+## Description
+
+<!-- SECTION:DESCRIPTION:BEGIN -->
+The reader pane scrolls but gives no visual indication of position or that there is more content below/above. Add a vertical scrollbar on the reader's right edge, shown only when the reader is the active (focused) pane and its wrapped content is taller than the viewport. This reuses the wrapped-height and reader_scroll values draw_reader already computes for scroll clamping.
+<!-- SECTION:DESCRIPTION:END -->
+
+## Acceptance Criteria
+<!-- AC:BEGIN -->
+- [x] #1 When the reader pane is focused and its wrapped content exceeds the visible height, a vertical scrollbar is drawn along the reader pane's right edge
+- [x] #2 The scrollbar thumb reflects the current scroll position and content-to-viewport ratio, updating as the reader scrolls (top/middle/bottom are distinguishable)
+- [x] #3 No scrollbar is shown when the reader pane is not focused, or when the content fits within the viewport (no overflow)
+- [x] #4 Reader text layout/wrapping is unaffected by the scrollbar (no content clipped by the scrollbar track)
+<!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+Use ratatui's Scrollbar widget on the reader's right edge.
+1. In draw_reader, reuse the already-computed wrapped height + inner_height + reader_scroll (the scroll clamp values). Overflow = wrapped > inner_height.
+2. After rendering the reader Paragraph+block, if focused (Focus::Reader) AND overflow, render Scrollbar(VerticalRight) into area.inner(Margin{vertical:1, horizontal:0}) so the track sits on the right border between the corners. ScrollbarState::new(wrapped).viewport_content_length(inner_height).position(reader_scroll) — ratatui maps position=content_length-viewport to thumb-at-bottom, matching max_scroll.
+3. Hidden when reader unfocused (focus Articles still shows the article, no bar) or when content fits (wrapped <= inner_height).
+4. Clean style: thumb block, track matching the border, no begin/end arrows.
+Tests: TestBackend — scrollbar cells present on right edge when reader focused + long content; absent when focused + short content; absent when content long but focus=Articles. fmt+clippy+test 10x.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Implemented in draw_reader: after rendering the reader Paragraph+block, if focus==Reader && wrapped > inner_height, render Scrollbar(VerticalRight) into area.inner(Margin{vertical:1}) so the track rides the right border between the corners. State = ScrollbarState::new(wrapped).viewport_content_length(inner_height).position(reader_scroll) — reuses the existing scroll-clamp values; ratatui maps position=content_length-viewport to a bottom thumb (== max_scroll). Thumb █ over a │ track (matches the border); no begin/end arrows. Scrollbar is on the border, not over the padded text, so nothing is clipped (AC#4). Hidden when content fits or the reader isn't focused (the reader still shows the article under Articles focus, just no bar). 3 new tests (shows-when-focused+overflow; hidden-when-fits; hidden-when-unfocused) via TestBackend, scanning the right-edge column for the █ thumb. fmt+clippy clean, 64 tests, stable 10/10. docs/architecture.md updated.
+<!-- SECTION:NOTES:END -->

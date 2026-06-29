@@ -199,6 +199,12 @@ ratatui's `unstable-rendered-line-info` feature) — clamping to the raw line co
 word-wrapped paragraphs at the top (a fixed bug; regression-tested). `inner_width`/`inner_height` come
 from `block.inner(area)`, so the clamp stays correct under the pane padding.
 
+A **scrollbar** (TASK-15) rides the reader's right border, shown only when the reader is the *focused*
+pane **and** the wrapped content overflows the viewport (`wrapped > inner_height`). It reuses those same
+values: a `ScrollbarState::new(wrapped).viewport_content_length(inner_height).position(reader_scroll)`
+rendered via `Scrollbar(VerticalRight)` into `area.inner(Margin{vertical:1,…})` (so it sits between the
+corners). ratatui maps `position = content_length − viewport` to a bottom thumb, matching `max_scroll`.
+
 ### Image pre-fetch (TASK-8)
 
 On `Msg::Loaded`, `refill_image_queue()` enumerates every article's image URLs in **on-screen
