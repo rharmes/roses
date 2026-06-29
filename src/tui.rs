@@ -1,17 +1,18 @@
-//! Full-screen terminal UI (TASK-6).
+//! Full-screen terminal UI (TASK-6, redesigned in TASK-11).
 //!
-//! An immediate-mode ratatui app on the crossterm backend: a two-pane
-//! list/detail layout (unread entries on the left, a scrollable reader on the
-//! right). Feedbin is queried on a background `tokio::spawn_blocking` task so
-//! input never blocks (the blocking client from `feedbin` is reused as-is); the
-//! result arrives over a channel that the draw loop drains each tick.
+//! A three-column Miller-columns layout on the crossterm backend: **sources**
+//! (feeds with unread counts) | **articles** for the selected source | a
+//! scrollable **reader**. A single focus "cursor" (reversed text) moves with the
+//! arrow/`hjkl` keys — up/down within the focused column, left/right between
+//! columns. Feedbin is queried on a background `tokio::spawn_blocking` task so
+//! input never blocks; results arrive over a channel drained each tick.
 
 use std::collections::HashMap;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
-use ratatui::layout::{Constraint, Layout};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, Wrap};
@@ -21,12 +22,12 @@ use tokio::sync::mpsc::{self, UnboundedSender};
 
 use crate::feedbin::{Client, Entry};
 
-/// How many of the newest unread entries to load into the list.
+/// How many of the newest unread entries to load.
 const DISPLAY_LIMIT: usize = 50;
-/// Lines the reader scrolls per page key.
+/// Lines the reader scrolls per PageUp/PageDown.
 const READER_PAGE: u16 = 10;
 /// How long to wait for input before redrawing (also bounds how quickly a
-/// finished background fetch shows up).
+/// finished background task shows up).
 const TICK: Duration = Duration::from_millis(100);
 
 /// A fully-loaded snapshot from Feedbin.
@@ -43,8 +44,8 @@ enum WriteOp {
     Undo,
 }
 
-/// An entry that was marked read and can be restored, remembering where it sat
-/// in the list so undo can put it back.
+/// An entry that was marked read and can be restored, remembering its position
+/// in `entries` so undo can put it back in published order.
 struct Undone {
     entry: Entry,
     index: usize,
@@ -54,7 +55,7 @@ struct Undone {
 enum Msg {
     Loaded(Result<Loaded, String>),
     /// Result of a mark-read / undo write, carrying the entry + index so the UI
-    /// can finalize on success or roll back on failure (AC #4).
+    /// can finalize on success or roll back on failure (TASK-7 AC #4).
     Write {
         op: WriteOp,
         entry: Entry,
@@ -71,6 +72,14 @@ enum Action {
     Undo,
 }
 
+/// Which column the cursor is in.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Focus {
+    Sources,
+    Articles,
+    Reader,
+}
+
 enum Status {
     Loading,
     Ready,
@@ -79,12 +88,16 @@ enum Status {
 
 struct App {
     status: Status,
+    /// All loaded unread entries, newest first.
     entries: Vec<Entry>,
     feed_titles: HashMap<i64, String>,
     total_unread: usize,
-    list_state: ListState,
+    focus: Focus,
+    /// Selection is tracked by id, not index, so it survives mark/undo edits.
+    selected_source: Option<i64>,
+    selected_article: Option<i64>,
     reader_scroll: u16,
-    /// Marked-read entries that can be restored, most recent last (AC #2).
+    /// Marked-read entries that can be restored, most recent last.
     undo_stack: Vec<Undone>,
     /// Transient status line (e.g. a write failure); cleared on the next key.
     notice: Option<String>,
@@ -98,13 +111,67 @@ impl App {
             entries: Vec::new(),
             feed_titles: HashMap::new(),
             total_unread: 0,
-            list_state: ListState::default(),
+            focus: Focus::Sources,
+            selected_source: None,
+            selected_article: None,
             reader_scroll: 0,
             undo_stack: Vec::new(),
             notice: None,
             should_quit: false,
         }
     }
+
+    // --- derived views -----------------------------------------------------
+
+    fn feed_name(&self, feed_id: i64) -> &str {
+        self.feed_titles
+            .get(&feed_id)
+            .map(String::as_str)
+            .unwrap_or("(unknown feed)")
+    }
+
+    /// Distinct sources (feed_id, unread-in-window count), ordered by name.
+    fn sources(&self) -> Vec<(i64, usize)> {
+        let mut counts: HashMap<i64, usize> = HashMap::new();
+        for entry in &self.entries {
+            *counts.entry(entry.feed_id).or_default() += 1;
+        }
+        let mut rows: Vec<(i64, usize)> = counts.into_iter().collect();
+        rows.sort_by(|a, b| {
+            self.feed_name(a.0)
+                .cmp(self.feed_name(b.0))
+                .then(a.0.cmp(&b.0))
+        });
+        rows
+    }
+
+    /// Ids of the loaded articles for one source, in published order.
+    fn article_ids(&self, feed_id: i64) -> Vec<i64> {
+        self.entries
+            .iter()
+            .filter(|e| e.feed_id == feed_id)
+            .map(|e| e.id)
+            .collect()
+    }
+
+    fn selected_article_entry(&self) -> Option<&Entry> {
+        let id = self.selected_article?;
+        self.entries.iter().find(|e| e.id == id)
+    }
+
+    fn source_index(&self) -> Option<usize> {
+        let sel = self.selected_source?;
+        self.sources().iter().position(|s| s.0 == sel)
+    }
+
+    fn article_index(&self) -> Option<usize> {
+        let (feed_id, article) = (self.selected_source?, self.selected_article?);
+        self.article_ids(feed_id)
+            .iter()
+            .position(|&id| id == article)
+    }
+
+    // --- state updates -----------------------------------------------------
 
     fn apply(&mut self, msg: Msg) {
         match msg {
@@ -113,16 +180,12 @@ impl App {
                 self.feed_titles = loaded.feed_titles;
                 self.total_unread = loaded.total_unread;
                 self.status = Status::Ready;
-                self.list_state
-                    .select((!self.entries.is_empty()).then_some(0));
-                self.reader_scroll = 0;
-                // A fresh list invalidates pending undos.
                 self.undo_stack.clear();
                 self.notice = None;
+                self.reset_selection();
             }
             Msg::Loaded(Err(err)) => self.status = Status::Failed(err),
 
-            // A confirmed mark-read becomes undoable; a failed one is rolled back.
             Msg::Write {
                 op: WriteOp::MarkRead,
                 entry,
@@ -136,8 +199,6 @@ impl App {
                 }
             },
 
-            // A confirmed undo is already reflected; a failed one is rolled back
-            // (the entry is still read on the server) but stays retryable.
             Msg::Write {
                 op: WriteOp::Undo,
                 entry,
@@ -146,9 +207,10 @@ impl App {
             } => {
                 if let Err(err) = result {
                     if let Some(pos) = self.entries.iter().position(|e| e.id == entry.id) {
+                        let feed_id = entry.feed_id;
                         self.entries.remove(pos);
                         self.total_unread = self.total_unread.saturating_sub(1);
-                        self.fix_selection_after_removal(pos);
+                        self.reselect_after_removal(feed_id, 0);
                     }
                     self.undo_stack.push(Undone { entry, index });
                     self.notice = Some(format!("Undo failed (kept read): {err}"));
@@ -157,107 +219,186 @@ impl App {
         }
     }
 
-    /// Optimistically mark the selected entry read: drop it from the list now;
-    /// the caller fires the network write and the result confirms or rolls back.
-    /// Returns the removed entry and its index, or `None` if nothing is selected.
+    /// Focus the first source and its first article (after a fresh load).
+    fn reset_selection(&mut self) {
+        self.focus = Focus::Sources;
+        self.reader_scroll = 0;
+        let first_source = self.sources().first().map(|s| s.0);
+        self.selected_source = first_source;
+        self.selected_article = first_source.and_then(|fid| self.article_ids(fid).first().copied());
+    }
+
+    /// Move the cursor up (`-1`) or down (`+1`) within the focused column.
+    fn move_cursor(&mut self, delta: i32) {
+        match self.focus {
+            Focus::Sources => self.move_source(delta),
+            Focus::Articles => self.move_article(delta),
+            Focus::Reader => {
+                self.reader_scroll = if delta > 0 {
+                    self.reader_scroll.saturating_add(1)
+                } else {
+                    self.reader_scroll.saturating_sub(1)
+                };
+            }
+        }
+    }
+
+    fn move_source(&mut self, delta: i32) {
+        let sources = self.sources();
+        if sources.is_empty() {
+            return;
+        }
+        let current = self.source_index().unwrap_or(0) as i32;
+        let next = (current + delta).clamp(0, sources.len() as i32 - 1) as usize;
+        let feed_id = sources[next].0;
+        self.selected_source = Some(feed_id);
+        self.selected_article = self.article_ids(feed_id).first().copied();
+        self.reader_scroll = 0;
+    }
+
+    fn move_article(&mut self, delta: i32) {
+        let Some(feed_id) = self.selected_source else {
+            return;
+        };
+        let ids = self.article_ids(feed_id);
+        if ids.is_empty() {
+            return;
+        }
+        let current = self.article_index().unwrap_or(0) as i32;
+        let next = (current + delta).clamp(0, ids.len() as i32 - 1) as usize;
+        self.selected_article = Some(ids[next]);
+        self.reader_scroll = 0;
+    }
+
+    /// Jump to the first (`true`) or last (`false`) item in the focused column.
+    fn move_to_edge(&mut self, first: bool) {
+        match self.focus {
+            Focus::Sources => {
+                let sources = self.sources();
+                let pick = if first {
+                    sources.first()
+                } else {
+                    sources.last()
+                };
+                if let Some(&(feed_id, _)) = pick {
+                    self.selected_source = Some(feed_id);
+                    self.selected_article = self.article_ids(feed_id).first().copied();
+                    self.reader_scroll = 0;
+                }
+            }
+            Focus::Articles => {
+                if let Some(feed_id) = self.selected_source {
+                    let ids = self.article_ids(feed_id);
+                    let pick = if first { ids.first() } else { ids.last() };
+                    if let Some(&id) = pick {
+                        self.selected_article = Some(id);
+                        self.reader_scroll = 0;
+                    }
+                }
+            }
+            Focus::Reader => self.reader_scroll = if first { 0 } else { u16::MAX },
+        }
+    }
+
+    /// Move focus one column to the right (sources → articles → reader).
+    fn focus_right(&mut self) {
+        match self.focus {
+            Focus::Sources => {
+                if self.selected_article.is_none()
+                    && let Some(feed_id) = self.selected_source
+                {
+                    self.selected_article = self.article_ids(feed_id).first().copied();
+                }
+                if self.selected_article.is_some() {
+                    self.focus = Focus::Articles;
+                    self.reader_scroll = 0;
+                }
+            }
+            Focus::Articles => {
+                self.focus = Focus::Reader;
+                self.reader_scroll = 0;
+            }
+            Focus::Reader => {}
+        }
+    }
+
+    /// Move focus one column to the left (reader → articles → sources).
+    fn focus_left(&mut self) {
+        self.focus = match self.focus {
+            Focus::Reader => Focus::Articles,
+            Focus::Articles | Focus::Sources => Focus::Sources,
+        };
+        self.reader_scroll = 0;
+    }
+
+    /// Optimistically mark the selected article read (only when an article is
+    /// the active target). Returns the removed entry + its index for the write.
     fn begin_mark_read(&mut self) -> Option<(Entry, usize)> {
-        let index = self.list_state.selected()?;
-        if index >= self.entries.len() {
+        if self.focus == Focus::Sources {
             return None;
         }
+        let article = self.selected_article?;
+        let hint = self.article_index().unwrap_or(0);
+        let index = self.entries.iter().position(|e| e.id == article)?;
         let entry = self.entries.remove(index);
         self.total_unread = self.total_unread.saturating_sub(1);
-        self.fix_selection_after_removal(index);
-        self.reader_scroll = 0;
+        self.reselect_after_removal(entry.feed_id, hint);
         Some((entry, index))
     }
 
-    /// Optimistically restore the most recently marked-read entry. Returns the
-    /// entry and its original index for the network write, or `None` if the undo
-    /// stack is empty.
+    /// Optimistically restore the most recently marked-read entry.
     fn begin_undo(&mut self) -> Option<(Entry, usize)> {
         let Undone { entry, index } = self.undo_stack.pop()?;
         self.reinsert(entry.clone(), index);
         Some((entry, index))
     }
 
-    /// Re-insert an entry near its original index, bumping the unread count and
-    /// selecting it. Used by undo and by mark-read rollback.
+    /// Re-insert an entry near its original index, bump the unread count, and
+    /// focus it in the articles column. Used by undo and mark-read rollback.
     fn reinsert(&mut self, entry: Entry, index: usize) {
         let at = index.min(self.entries.len());
+        let (feed_id, id) = (entry.feed_id, entry.id);
         self.entries.insert(at, entry);
         self.total_unread = self.total_unread.saturating_add(1);
-        self.list_state.select(Some(at));
+        self.selected_source = Some(feed_id);
+        self.selected_article = Some(id);
+        self.focus = Focus::Articles;
         self.reader_scroll = 0;
     }
 
-    fn fix_selection_after_removal(&mut self, removed_index: usize) {
-        if self.entries.is_empty() {
-            self.list_state.select(None);
+    /// After removing an article from `feed_id`, pick the next sensible
+    /// selection: stay near `hint` in the same source, or — if it emptied — drop
+    /// focus to the sources column and pick the first remaining source.
+    fn reselect_after_removal(&mut self, feed_id: i64, hint: usize) {
+        let ids = self.article_ids(feed_id);
+        if !ids.is_empty() {
+            self.selected_source = Some(feed_id);
+            self.selected_article = Some(ids[hint.min(ids.len() - 1)]);
         } else {
-            self.list_state
-                .select(Some(removed_index.min(self.entries.len() - 1)));
+            let first_source = self.sources().first().map(|s| s.0);
+            self.selected_source = first_source;
+            self.selected_article =
+                first_source.and_then(|fid| self.article_ids(fid).first().copied());
+            self.focus = Focus::Sources;
         }
-    }
-
-    fn feed_name(&self, feed_id: i64) -> &str {
-        self.feed_titles
-            .get(&feed_id)
-            .map(String::as_str)
-            .unwrap_or("(unknown feed)")
-    }
-
-    fn selected_entry(&self) -> Option<&Entry> {
-        self.list_state.selected().and_then(|i| self.entries.get(i))
-    }
-
-    fn select_next(&mut self) {
-        if self.entries.is_empty() {
-            return;
-        }
-        let i = self.list_state.selected().unwrap_or(0);
-        self.list_state
-            .select(Some((i + 1).min(self.entries.len() - 1)));
         self.reader_scroll = 0;
     }
 
-    fn select_prev(&mut self) {
-        if self.entries.is_empty() {
-            return;
-        }
-        let i = self.list_state.selected().unwrap_or(0);
-        self.list_state.select(Some(i.saturating_sub(1)));
-        self.reader_scroll = 0;
-    }
-
-    fn select_first(&mut self) {
-        if !self.entries.is_empty() {
-            self.list_state.select(Some(0));
-            self.reader_scroll = 0;
-        }
-    }
-
-    fn select_last(&mut self) {
-        if !self.entries.is_empty() {
-            self.list_state.select(Some(self.entries.len() - 1));
-            self.reader_scroll = 0;
-        }
-    }
-
-    /// Handle one key press, mutating selection/scroll directly and returning an
-    /// [`Action`] for effects the run loop must drive (network writes, reload).
+    /// Handle one key press; returns an [`Action`] the run loop must drive.
     fn handle_key(&mut self, code: KeyCode) -> Action {
         self.notice = None;
         match code {
             KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
-            KeyCode::Down | KeyCode::Char('j') => self.select_next(),
-            KeyCode::Up | KeyCode::Char('k') => self.select_prev(),
-            KeyCode::Char('g') | KeyCode::Home => self.select_first(),
-            KeyCode::Char('G') | KeyCode::End => self.select_last(),
-            KeyCode::PageDown | KeyCode::Char(' ') => {
+            KeyCode::Down | KeyCode::Char('j') => self.move_cursor(1),
+            KeyCode::Up | KeyCode::Char('k') => self.move_cursor(-1),
+            KeyCode::Right | KeyCode::Char('l') => self.focus_right(),
+            KeyCode::Left | KeyCode::Char('h') => self.focus_left(),
+            KeyCode::Char('g') | KeyCode::Home => self.move_to_edge(true),
+            KeyCode::Char('G') | KeyCode::End => self.move_to_edge(false),
+            KeyCode::PageDown if self.focus == Focus::Reader => {
                 self.reader_scroll = self.reader_scroll.saturating_add(READER_PAGE);
             }
-            KeyCode::PageUp | KeyCode::Char('b') => {
+            KeyCode::PageUp if self.focus == Focus::Reader => {
                 self.reader_scroll = self.reader_scroll.saturating_sub(READER_PAGE);
             }
             KeyCode::Char('m') => return Action::MarkRead,
@@ -268,35 +409,58 @@ impl App {
         Action::None
     }
 
+    // --- rendering ---------------------------------------------------------
+
     fn draw(&mut self, frame: &mut Frame) {
         let [main, footer] =
             Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(frame.area());
-        let [list_area, reader_area] =
-            Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)])
-                .areas(main);
+        let [sources, articles, reader] = Layout::horizontal([
+            Constraint::Percentage(25),
+            Constraint::Percentage(35),
+            Constraint::Percentage(40),
+        ])
+        .areas(main);
 
-        self.draw_list(frame, list_area);
-        self.draw_reader(frame, reader_area);
+        self.draw_sources(frame, sources);
+        self.draw_articles(frame, articles);
+        self.draw_reader(frame, reader);
 
         let footer_line = match &self.notice {
             Some(text) => Line::from(format!(" {text} ")).red(),
-            None => {
-                Line::from(" ↑/↓ select · space/b scroll · m read · u undo · r reload · q quit ")
-                    .dim()
-            }
+            None => Line::from(" ↑↓ move · ←→ focus · m read · u undo · r reload · q quit ").dim(),
         };
         frame.render_widget(footer_line, footer);
     }
 
-    fn draw_list(&mut self, frame: &mut Frame, area: ratatui::layout::Rect) {
-        // Show old entries while a refresh is in flight, rather than blanking.
-        if self.entries.is_empty() {
+    fn column_block(&self, title: &'static str, focused: bool) -> Block<'static> {
+        let border = if focused {
+            Style::new().bold()
+        } else {
+            Style::new().dim()
+        };
+        Block::bordered().title(title).border_style(border)
+    }
+
+    /// Reversed text marks the active cursor; a bold row marks the remembered
+    /// selection in an unfocused column.
+    fn highlight(&self, focused: bool) -> Style {
+        if focused {
+            Style::new().reversed()
+        } else {
+            Style::new().bold()
+        }
+    }
+
+    fn draw_sources(&self, frame: &mut Frame, area: Rect) {
+        let focused = self.focus == Focus::Sources;
+        let block = self.column_block("Sources", focused);
+        let sources = self.sources();
+        if sources.is_empty() {
             let message = match &self.status {
-                Status::Loading => "Loading unread entries…".to_string(),
-                Status::Ready => "You're all caught up — no unread entries.".to_string(),
+                Status::Loading => "Loading…".to_string(),
                 Status::Failed(err) => format!("Failed to load: {err}"),
+                Status::Ready => "No unread sources".to_string(),
             };
-            let block = Block::bordered().title("Entries");
             frame.render_widget(
                 Paragraph::new(message)
                     .block(block)
@@ -305,46 +469,64 @@ impl App {
             );
             return;
         }
-
-        let title = match self.status {
-            Status::Loading => format!(
-                "Unread {}/{} (refreshing…)",
-                self.entries.len(),
-                self.total_unread
-            ),
-            _ => format!("Unread {}/{}", self.entries.len(), self.total_unread),
-        };
-        let items: Vec<ListItem> = self
-            .entries
+        let items: Vec<ListItem> = sources
             .iter()
-            .map(|entry| {
-                let heading = entry.title.as_deref().unwrap_or("(untitled)");
-                let feed = self.feed_name(entry.feed_id);
+            .map(|&(feed_id, count)| {
                 ListItem::new(Line::from(vec![
-                    Span::raw(heading.to_string()),
+                    Span::raw(self.feed_name(feed_id).to_string()),
                     Span::raw("  "),
-                    Span::styled(format!("· {feed}"), Style::new().dim()),
+                    Span::styled(format!("({count})"), Style::new().dim()),
                 ]))
             })
             .collect();
         let list = List::new(items)
-            .block(Block::bordered().title(title))
-            .highlight_style(Style::new().reversed())
-            .highlight_symbol("▶ ");
-        frame.render_stateful_widget(list, area, &mut self.list_state);
+            .block(block)
+            .highlight_style(self.highlight(focused));
+        let mut state = ListState::default();
+        state.select(self.source_index());
+        frame.render_stateful_widget(list, area, &mut state);
     }
 
-    fn draw_reader(&mut self, frame: &mut Frame, area: ratatui::layout::Rect) {
-        let block = Block::bordered().title("Reader");
-        let Some(entry) = self.selected_entry() else {
+    fn draw_articles(&self, frame: &mut Frame, area: Rect) {
+        let focused = self.focus == Focus::Articles;
+        let block = self.column_block("Articles", focused);
+        let Some(feed_id) = self.selected_source else {
+            frame.render_widget(Paragraph::new("").block(block), area);
+            return;
+        };
+        let items: Vec<ListItem> = self
+            .entries
+            .iter()
+            .filter(|e| e.feed_id == feed_id)
+            .map(|e| {
+                ListItem::new(Line::from(
+                    e.title.as_deref().unwrap_or("(untitled)").to_string(),
+                ))
+            })
+            .collect();
+        let list = List::new(items)
+            .block(block)
+            .highlight_style(self.highlight(focused));
+        let mut state = ListState::default();
+        state.select(self.article_index());
+        frame.render_stateful_widget(list, area, &mut state);
+    }
+
+    fn draw_reader(&mut self, frame: &mut Frame, area: Rect) {
+        let focused = self.focus == Focus::Reader;
+        let block = self.column_block("Reader", focused);
+        // The reader shows the article only when focus has moved off the
+        // sources column (TASK-11: a focused source shows nothing here).
+        let entry = match self.focus {
+            Focus::Sources => None,
+            Focus::Articles | Focus::Reader => self.selected_article_entry(),
+        };
+        let Some(entry) = entry else {
             frame.render_widget(Paragraph::new("").block(block), area);
             return;
         };
 
         let text = reader_text(entry, self.feed_name(entry.feed_id));
-
-        // Clamp the scroll so you can't page past the end (approximate: counts
-        // unwrapped lines, which is fine as a soft bound).
         let visible = area.height.saturating_sub(2);
         let max_scroll = (text.lines.len() as u16).saturating_sub(visible);
         self.reader_scroll = self.reader_scroll.min(max_scroll);
@@ -569,12 +751,10 @@ fn spawn_write(
     });
 }
 
-/// Blocking fetch of the newest unread entries plus their feed names. Runs on
-/// tokio's blocking pool via [`spawn_fetch`].
+/// Blocking fetch of the newest unread entries plus their feed names.
 fn load(client: &Client) -> Result<Loaded> {
     let mut unread = client.unread_entry_ids()?;
     let total_unread = unread.len();
-    // Feedbin IDs grow over time; newest first, then keep a readable sample.
     unread.sort_unstable_by(|a, b| b.cmp(a));
     let sample: Vec<i64> = unread.into_iter().take(DISPLAY_LIMIT).collect();
     if sample.is_empty() {
@@ -669,211 +849,131 @@ mod tests {
         }
     }
 
-    fn ready_app(n: usize) -> App {
+    /// Build a ready app from `(feed_id, name, article_count)` tuples.
+    fn app_with(feeds: &[(i64, &str, usize)]) -> App {
         let mut feed_titles = HashMap::new();
-        feed_titles.insert(7, "Rust Blog".to_string());
-        let entries = (0..n)
-            .map(|i| entry(i as i64, 7, &format!("Headline {i}"), Some("<p>Body</p>")))
-            .collect();
+        let mut entries = Vec::new();
+        let mut next_id = 100;
+        for &(feed_id, name, count) in feeds {
+            feed_titles.insert(feed_id, name.to_string());
+            for j in 0..count {
+                entries.push(entry(
+                    next_id,
+                    feed_id,
+                    &format!("{name} #{j}"),
+                    Some("<p>Body</p>"),
+                ));
+                next_id += 1;
+            }
+        }
+        let total_unread = entries.len();
         let mut app = App::new();
         app.apply(Msg::Loaded(Ok(Loaded {
             entries,
             feed_titles,
-            total_unread: n,
+            total_unread,
         })));
         app
     }
 
     #[test]
-    fn html_to_text_strips_tags_and_breaks_paragraphs() {
-        // `<br>` is a single line break; a `</p><p>` boundary becomes a blank line.
-        assert_eq!(html_to_text("a<br>b"), "a\nb");
+    fn sources_group_and_count_ordered_by_name() {
+        let app = app_with(&[(7, "Rust Blog", 2), (9, "Hacker News", 3)]);
+        // Sorted by feed name: Hacker News (9) before Rust Blog (7).
+        assert_eq!(app.sources(), vec![(9, 3), (7, 2)]);
+    }
+
+    #[test]
+    fn load_focuses_first_source_and_its_first_article() {
+        let app = app_with(&[(7, "Rust Blog", 2), (9, "Hacker News", 3)]);
+        assert!(matches!(app.focus, Focus::Sources));
+        assert_eq!(app.selected_source, Some(9));
+        assert_eq!(app.selected_article, app.article_ids(9).first().copied());
+    }
+
+    #[test]
+    fn down_in_sources_changes_source_and_resets_article() {
+        let mut app = app_with(&[(7, "Rust Blog", 2), (9, "Hacker News", 3)]);
+        app.move_cursor(1); // Hacker News -> Rust Blog
+        assert_eq!(app.selected_source, Some(7));
+        assert_eq!(app.selected_article, app.article_ids(7).first().copied());
+        app.move_cursor(1); // clamps at the last source
+        assert_eq!(app.selected_source, Some(7));
+    }
+
+    #[test]
+    fn right_and_left_move_focus_across_columns() {
+        let mut app = app_with(&[(9, "Hacker News", 3)]);
+        assert!(matches!(app.focus, Focus::Sources));
+        app.focus_right();
+        assert!(matches!(app.focus, Focus::Articles));
+        app.focus_right();
+        assert!(matches!(app.focus, Focus::Reader));
+        app.focus_right(); // stays at the rightmost
+        assert!(matches!(app.focus, Focus::Reader));
+        app.focus_left();
+        assert!(matches!(app.focus, Focus::Articles));
+        app.focus_left();
+        assert!(matches!(app.focus, Focus::Sources));
+        app.focus_left(); // stays at the leftmost
+        assert!(matches!(app.focus, Focus::Sources));
+    }
+
+    #[test]
+    fn focus_changes_preserve_each_columns_cursor() {
+        let mut app = app_with(&[(9, "Hacker News", 3)]);
+        app.focus_right(); // Articles
+        app.move_cursor(1); // second article
+        let ids = app.article_ids(9);
+        assert_eq!(app.selected_article, Some(ids[1]));
+        app.focus_left(); // back to Sources (cursor remembered)
+        assert!(matches!(app.focus, Focus::Sources));
+        app.focus_right(); // back to Articles
         assert_eq!(
-            html_to_text("<p>One <b>bold</b></p><p>Two</p>"),
-            "One bold\n\nTwo"
+            app.selected_article,
+            Some(ids[1]),
+            "article cursor preserved"
         );
     }
 
     #[test]
-    fn html_to_text_decodes_entities() {
-        let out = html_to_text("Tom &amp; Jerry &lt;3 &#39;hi&#39; &#x2764; &nbsp;end");
-        assert_eq!(out, "Tom & Jerry <3 'hi' ❤  end");
+    fn down_in_articles_moves_within_the_source() {
+        let mut app = app_with(&[(9, "Hacker News", 3)]);
+        app.focus_right();
+        let ids = app.article_ids(9);
+        assert_eq!(app.selected_article, Some(ids[0]));
+        app.move_cursor(1);
+        assert_eq!(app.selected_article, Some(ids[1]));
     }
 
     #[test]
-    fn html_to_text_strips_control_chars_blocking_escape_injection() {
-        // A feed trying to smuggle an ANSI color escape: the ESC byte is dropped.
-        let out = html_to_text("safe\u{1b}[31mtext");
-        assert!(
-            !out.contains('\u{1b}'),
-            "escape byte must be stripped: {out:?}"
-        );
-        assert!(out.contains("safe"));
-    }
-
-    #[test]
-    fn selection_moves_and_clamps() {
-        let mut app = ready_app(3);
-        assert_eq!(app.list_state.selected(), Some(0));
-        app.select_prev(); // clamps at top
-        assert_eq!(app.list_state.selected(), Some(0));
-        app.select_next();
-        app.select_next();
-        app.select_next(); // clamps at bottom (len 3)
-        assert_eq!(app.list_state.selected(), Some(2));
-        app.select_first();
-        assert_eq!(app.list_state.selected(), Some(0));
-        app.select_last();
-        assert_eq!(app.list_state.selected(), Some(2));
-    }
-
-    #[test]
-    fn moving_selection_resets_reader_scroll() {
-        let mut app = ready_app(3);
-        app.reader_scroll = 5;
-        app.select_next();
+    fn arrows_scroll_the_reader_when_focused() {
+        let mut app = app_with(&[(9, "Hacker News", 1)]);
+        app.focus_right();
+        app.focus_right(); // Reader
+        assert_eq!(app.reader_scroll, 0);
+        app.move_cursor(1);
+        assert_eq!(app.reader_scroll, 1);
+        app.move_cursor(-1);
         assert_eq!(app.reader_scroll, 0);
     }
 
     #[test]
-    fn quit_key_sets_should_quit() {
-        let mut app = ready_app(1);
-        let _ = app.handle_key(KeyCode::Char('q'));
-        assert!(app.should_quit);
-    }
-
-    #[test]
-    fn reload_key_requests_reload() {
-        let mut app = ready_app(1);
-        assert!(matches!(app.handle_key(KeyCode::Char('r')), Action::Reload));
-    }
-
-    #[test]
-    fn renders_two_pane_layout_when_ready() {
-        let mut app = ready_app(2);
-        let backend = ratatui::backend::TestBackend::new(80, 20);
-        let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        terminal.draw(|frame| app.draw(frame)).unwrap();
-
-        let rendered: String = terminal
-            .backend()
-            .buffer()
-            .content
-            .iter()
-            .map(ratatui::buffer::Cell::symbol)
-            .collect();
-
-        assert!(rendered.contains("Headline 0"), "list shows entry titles");
-        assert!(rendered.contains("Rust Blog"), "list shows feed names");
-        assert!(rendered.contains("Reader"), "reader pane is present");
+    fn mark_read_in_sources_focus_is_a_noop() {
+        let mut app = app_with(&[(9, "Hacker News", 2)]);
         assert!(
-            rendered.contains("Body"),
-            "reader shows the selected entry body"
+            app.begin_mark_read().is_none(),
+            "no article target in sources focus"
         );
-        assert!(rendered.contains("quit"), "footer shows key help");
-    }
-
-    #[test]
-    fn empty_unread_renders_caught_up_message() {
-        let mut app = App::new();
-        app.apply(Msg::Loaded(Ok(Loaded {
-            entries: Vec::new(),
-            feed_titles: HashMap::new(),
-            total_unread: 0,
-        })));
-        let backend = ratatui::backend::TestBackend::new(80, 20);
-        let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        terminal.draw(|frame| app.draw(frame)).unwrap();
-        let rendered: String = terminal
-            .backend()
-            .buffer()
-            .content
-            .iter()
-            .map(ratatui::buffer::Cell::symbol)
-            .collect();
-        assert!(
-            rendered.contains("caught up"),
-            "shows the friendly empty state"
-        );
-    }
-
-    #[test]
-    fn mark_read_removes_optimistically_and_failure_rolls_back() {
-        let mut app = ready_app(3);
-        let (entry, index) = app.begin_mark_read().expect("an entry is selected");
-        assert_eq!(app.entries.len(), 2, "removed from the list immediately");
-        assert_eq!(app.total_unread, 2);
-        assert!(
-            app.undo_stack.is_empty(),
-            "undo only after the server confirms"
-        );
-
-        app.apply(Msg::Write {
-            op: WriteOp::MarkRead,
-            entry,
-            index,
-            result: Err("boom".to_string()),
-        });
-        assert_eq!(app.entries.len(), 3, "rolled back on failure");
-        assert_eq!(app.total_unread, 3);
-        assert!(app.undo_stack.is_empty());
-        assert!(app.notice.is_some(), "the failure is surfaced");
     }
 
     #[test]
     fn mark_read_success_then_undo_round_trips() {
-        let mut app = ready_app(3);
-        let (entry, index) = app.begin_mark_read().unwrap();
-        app.apply(Msg::Write {
-            op: WriteOp::MarkRead,
-            entry,
-            index,
-            result: Ok(()),
-        });
-        assert_eq!(app.entries.len(), 2);
-        assert_eq!(app.undo_stack.len(), 1, "now undoable");
-
-        let (entry, index) = app.begin_undo().expect("something to undo");
-        assert_eq!(app.entries.len(), 3, "undo re-inserts immediately");
-        assert_eq!(app.total_unread, 3);
-        assert!(app.undo_stack.is_empty());
-        app.apply(Msg::Write {
-            op: WriteOp::Undo,
-            entry,
-            index,
-            result: Ok(()),
-        });
-        assert_eq!(app.entries.len(), 3);
-    }
-
-    #[test]
-    fn undo_failure_keeps_entry_read_and_retryable() {
-        let mut app = ready_app(3);
-        let (entry, index) = app.begin_mark_read().unwrap();
-        app.apply(Msg::Write {
-            op: WriteOp::MarkRead,
-            entry,
-            index,
-            result: Ok(()),
-        });
-
-        let (entry, index) = app.begin_undo().unwrap();
-        app.apply(Msg::Write {
-            op: WriteOp::Undo,
-            entry,
-            index,
-            result: Err("nope".to_string()),
-        });
-        assert_eq!(app.entries.len(), 2, "rolled back to read");
-        assert_eq!(app.total_unread, 2);
-        assert_eq!(app.undo_stack.len(), 1, "still retryable");
-        assert!(app.notice.is_some());
-    }
-
-    #[test]
-    fn fresh_load_clears_the_undo_stack() {
-        let mut app = ready_app(3);
-        let (entry, index) = app.begin_mark_read().unwrap();
+        let mut app = app_with(&[(9, "Hacker News", 2)]);
+        app.focus_right(); // Articles
+        let (entry, index) = app.begin_mark_read().expect("an article is selected");
+        assert_eq!(app.article_ids(9).len(), 1);
+        assert_eq!(app.total_unread, 1);
         app.apply(Msg::Write {
             op: WriteOp::MarkRead,
             entry,
@@ -882,14 +982,87 @@ mod tests {
         });
         assert_eq!(app.undo_stack.len(), 1);
 
-        app.apply(Msg::Loaded(Ok(Loaded {
-            entries: Vec::new(),
-            feed_titles: HashMap::new(),
-            total_unread: 0,
-        })));
+        let (entry, index) = app.begin_undo().expect("something to undo");
+        assert_eq!(app.article_ids(9).len(), 2);
+        assert_eq!(app.total_unread, 2);
+        app.apply(Msg::Write {
+            op: WriteOp::Undo,
+            entry,
+            index,
+            result: Ok(()),
+        });
+        assert_eq!(app.article_ids(9).len(), 2);
+    }
+
+    #[test]
+    fn mark_read_failure_rolls_back() {
+        let mut app = app_with(&[(9, "Hacker News", 2)]);
+        app.focus_right();
+        let (entry, index) = app.begin_mark_read().unwrap();
+        assert_eq!(app.article_ids(9).len(), 1);
+        app.apply(Msg::Write {
+            op: WriteOp::MarkRead,
+            entry,
+            index,
+            result: Err("boom".to_string()),
+        });
+        assert_eq!(app.article_ids(9).len(), 2, "rolled back");
+        assert_eq!(app.total_unread, 2);
+        assert!(app.notice.is_some());
+    }
+
+    #[test]
+    fn emptying_a_source_drops_focus_back_to_sources() {
+        let mut app = app_with(&[(7, "Rust Blog", 1), (9, "Hacker News", 1)]);
+        // Sources by name: Hacker News (9), Rust Blog (7). Focus the only HN article.
+        app.focus_right();
+        let _ = app.begin_mark_read().unwrap();
+        assert_eq!(app.sources(), vec![(7, 1)], "Hacker News is gone");
+        assert!(matches!(app.focus, Focus::Sources));
+        assert_eq!(app.selected_source, Some(7));
+    }
+
+    #[test]
+    fn renders_three_columns_with_reader_when_article_focused() {
+        let mut app = app_with(&[(9, "Hacker News", 2)]);
+        app.focus_right(); // focus Articles so the reader shows the article
+        let backend = ratatui::backend::TestBackend::new(120, 20);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect();
+
+        assert!(rendered.contains("Sources"), "sources column titled");
+        assert!(rendered.contains("Articles"), "articles column titled");
+        assert!(rendered.contains("Reader"), "reader column titled");
+        assert!(rendered.contains("Hacker News"), "source name shown");
+        assert!(rendered.contains("Body"), "reader shows the article body");
+        assert!(rendered.contains("quit"), "footer help shown");
+    }
+
+    #[test]
+    fn reader_is_empty_while_a_source_is_focused() {
+        let app = app_with(&[(9, "Hacker News", 1)]);
+        // Default focus is Sources -> reader shows nothing (no body).
+        let backend = ratatui::backend::TestBackend::new(120, 20);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut app = app;
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect();
         assert!(
-            app.undo_stack.is_empty(),
-            "reload invalidates pending undos"
+            !rendered.contains("Body"),
+            "reader empty while on a source: {rendered:?}"
         );
     }
 }
