@@ -1,11 +1,11 @@
 ---
 id: TASK-6
 title: Full-screen ratatui TUI shell (feeds / entries / reader)
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-06-29 00:56'
-updated_date: '2026-06-29 15:20'
+updated_date: '2026-06-29 15:28'
 labels:
   - rust
   - ui
@@ -26,8 +26,8 @@ Replace the stdout proof-of-concept with the real terminal UI: a full-screen rat
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [x] #1 Full-screen ratatui app renders a list/detail layout (entries list + reader pane) on the crossterm backend
-- [ ] #2 Entries load from Feedbin asynchronously without blocking input
-- [ ] #3 Keyboard navigation moves selection and scrolls the reader; quitting restores the terminal cleanly
+- [x] #2 Entries load from Feedbin asynchronously without blocking input
+- [x] #3 Keyboard navigation moves selection and scrolls the reader; quitting restores the terminal cleanly
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -48,3 +48,9 @@ Async model: Option 1 (tokio + spawn_blocking) — keep the blocking client; run
 <!-- SECTION:NOTES:BEGIN -->
 Implemented src/tui.rs (ratatui 0.30 + crossterm): two-pane list/detail — entries List/ListState + scrollable Paragraph reader + footer key help (AC#1). Async load via tokio spawn_blocking reusing the blocking client; results over an mpsc channel drained each 100ms tick, so input never blocks (AC#2). Keys: up/down|j/k select (reset reader scroll), g/G first/last, PgUp/PgDn|u/d scroll, r reload, q/Esc quit; ratatui::init/restore + panic hook for clean teardown (AC#3). html_to_text() strips tags, maps block tags to newlines, decodes common entities, and drops control chars (blocks feed ANSI-escape injection). feedbin.rs: Client now derives Clone; Entry gained summary+content. main.rs: default launches the TUI, 'list' keeps the stdout fallback, 'logout' unchanged. Deps: ratatui 0.30, tokio {rt, sync}; CLAUDE.md source-layout updated. Verified: fmt, clippy --all-targets -- -D warnings, 24 tests (9 new: TestBackend two-pane layout snapshot, empty 'caught up' state, html_to_text incl. an escape-injection case, selection/scroll transitions, quit/reload keys), stable across 10 runs. AC#1 is test-backed and checked. AC#2 (non-blocking async load) and AC#3 (nav/scroll + clean terminal restore) are implemented and partly unit-tested, but the live feel — responsiveness and terminal restoration — needs a real 'cargo run' against the account.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Replaced the stdout PoC with a full-screen ratatui TUI (crossterm). Two-pane list/detail: an unread-entries List/ListState on the left and a scrollable Paragraph reader on the right, plus a key-help footer. Entries load asynchronously via tokio spawn_blocking (reusing the blocking Feedbin client); results arrive over an mpsc channel drained each 100ms tick, so keyboard input never blocks. Keys: up/down|j/k select, g/G first/last, PgUp/PgDn|u/d scroll, r reload, q/Esc quit; ratatui::init/restore + panic hook restore the terminal cleanly on exit. The reader renders entry HTML to text via a helper that strips control characters (prevents feed escape-sequence injection). main.rs: default launches the TUI, 'roses list' is the stdout fallback, 'roses logout' unchanged. Deps: ratatui 0.30, tokio {rt,sync}. Verified: fmt, clippy -D warnings, 24 tests (9 new incl. a TestBackend layout snapshot) stable 10x + green CI; user confirmed the live TUI (navigation, async load, clean quit) against their real account. All 3 ACs verified.
+<!-- SECTION:FINAL_SUMMARY:END -->
