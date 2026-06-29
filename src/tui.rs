@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
 use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, List, ListItem, ListState, Padding, Paragraph, Wrap};
@@ -24,6 +24,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::browser;
 use crate::config::BrowserPref;
 use crate::feedbin::{Client, Entry};
+use crate::theme;
 
 /// How many of the newest unread entries to load.
 const DISPLAY_LIMIT: usize = 50;
@@ -542,38 +543,49 @@ impl App {
     fn draw(&mut self, frame: &mut Frame) {
         let [main, footer] =
             Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(frame.area());
-        let [sources, articles, reader] = Layout::horizontal([
-            Constraint::Percentage(25),
-            Constraint::Percentage(35),
-            Constraint::Percentage(40),
-        ])
-        .areas(main);
 
-        // Record the reader's content width every frame so background image
-        // pre-fetches size their art to fit even before the reader is opened.
-        // Mirror draw_reader's inner rect (border + padding) so the art width
-        // matches the real content area.
-        self.reader_width = self.column_block("Reader", false).inner(reader).width;
+        // When everything is read (Ready with nothing unread), show the rose in
+        // place of empty columns (TASK-14). Loading and failure states keep the
+        // three-column view (their status text lives in the Sources pane).
+        if matches!(self.status, Status::Ready) && self.entries.is_empty() {
+            draw_caught_up(frame, main);
+        } else {
+            let [sources, articles, reader] = Layout::horizontal([
+                Constraint::Percentage(25),
+                Constraint::Percentage(35),
+                Constraint::Percentage(40),
+            ])
+            .areas(main);
 
-        self.draw_sources(frame, sources);
-        self.draw_articles(frame, articles);
-        self.draw_reader(frame, reader);
+            // Record the reader's content width every frame so background image
+            // pre-fetches size their art to fit even before the reader is opened.
+            // Mirror draw_reader's inner rect (border + padding) so the art width
+            // matches the real content area.
+            self.reader_width = self.column_block("Reader", false).inner(reader).width;
+
+            self.draw_sources(frame, sources);
+            self.draw_articles(frame, articles);
+            self.draw_reader(frame, reader);
+        }
 
         let footer_line = match &self.notice {
             Some(text) => Line::from(format!(" {text} ")).red(),
-            None => {
-                Line::from(" ↑↓ move · ←→ focus · m read · u undo · o open · r reload · q quit ")
-                    .dim()
-            }
+            None => footer_help(),
         };
         frame.render_widget(footer_line, footer);
     }
 
     fn column_block(&self, title: &'static str, focused: bool) -> Block<'static> {
-        let border = if focused {
-            Style::new().bold()
+        // The focused pane lights up in rose (border + title); unfocused panes stay
+        // neutral (dim border, plain title) so only the active column draws the eye
+        // (TASK-14, chrome-only accent).
+        let (border, title_line) = if focused {
+            (
+                Style::new().fg(theme::ROSE).bold(),
+                Line::from(Span::styled(title, Style::new().fg(theme::ROSE).bold())),
+            )
         } else {
-            Style::new().dim()
+            (Style::new().dim(), Line::from(title))
         };
         // Inset the content from the border for breathing room (TASK-12): one cell
         // of horizontal padding, no top/bottom inset, applied to every pane via this
@@ -581,16 +593,18 @@ impl App {
         // scroll bounds from `block.inner(area)`, so this padding is accounted for
         // there automatically.
         Block::bordered()
-            .title(title)
+            .title(title_line)
             .border_style(border)
             .padding(Padding::horizontal(1))
     }
 
-    /// Reversed text marks the active cursor; a bold row marks the remembered
-    /// selection in an unfocused column.
+    /// A rose-tinted reversed bar marks the active cursor; a bold row marks the
+    /// remembered selection in an unfocused column. `reversed()` swaps the rose
+    /// foreground onto the background, so the selection reads as a rose bar
+    /// (TASK-14) while keeping the `REVERSED` modifier.
     fn highlight(&self, focused: bool) -> Style {
         if focused {
-            Style::new().reversed()
+            Style::new().fg(theme::ROSE).reversed()
         } else {
             Style::new().bold()
         }
@@ -708,6 +722,89 @@ impl App {
     }
 }
 
+/// The footer key-help line, with the action keys accented in rose (TASK-14); the
+/// arrows, labels, and separators stay dim.
+fn footer_help() -> Line<'static> {
+    let key = |k: &'static str| Span::styled(k, Style::new().fg(theme::ROSE).bold());
+    let text = |s: &'static str| Span::raw(s).dim();
+    Line::from(vec![
+        text(" ↑↓ move · ←→ focus · "),
+        key("m"),
+        text(" read · "),
+        key("u"),
+        text(" undo · "),
+        key("o"),
+        text(" open · "),
+        key("r"),
+        text(" reload · "),
+        key("q"),
+        text(" quit "),
+    ])
+}
+
+/// The "all caught up" rose (TASK-14): a vertically-centered ASCII rose graded
+/// light→deep rose over a green stem, with a caption beneath. Degrades to just the
+/// centered caption when the area is too small for the art.
+fn draw_caught_up(frame: &mut Frame, area: Rect) {
+    const ART: [&str; 8] = [
+        "   ___   ",
+        "  (   )  ",
+        " ( (@) ) ",
+        "  )   (  ",
+        "   '-'   ",
+        "    |    ",
+        "   \\|/   ",
+        "    |    ",
+    ];
+    const CAPTION: &str = "All caught up.";
+    /// The first rows are the bloom (rose gradient); the rest are the stem/leaf.
+    const PETAL_ROWS: usize = 5;
+
+    let art_w = ART
+        .iter()
+        .map(|line| UnicodeWidthStr::width(*line))
+        .chain(std::iter::once(UnicodeWidthStr::width(CAPTION)))
+        .max()
+        .unwrap_or(0) as u16;
+    let art_h = ART.len() as u16 + 2; // blank spacer + caption
+
+    // Too small for the rose: show just the centered caption (still informative).
+    if area.height < art_h || area.width < art_w {
+        let [band] = Layout::vertical([Constraint::Length(1)])
+            .flex(Flex::Center)
+            .areas(area);
+        let caption = Line::from(Span::styled(CAPTION, Style::new().fg(theme::ROSE_DIM)));
+        frame.render_widget(Paragraph::new(caption).alignment(Alignment::Center), band);
+        return;
+    }
+
+    // All art rows share one width, so centering each line keeps the art's internal
+    // alignment while centering the whole bloom.
+    let mut lines: Vec<Line> = ART
+        .iter()
+        .enumerate()
+        .map(|(row, art)| {
+            let color = if row < PETAL_ROWS {
+                let t = row as f32 / (PETAL_ROWS - 1) as f32;
+                theme::lerp(theme::ROSE_LIGHT, theme::ROSE_DEEP, t)
+            } else {
+                theme::LEAF
+            };
+            Line::from(Span::styled((*art).to_string(), Style::new().fg(color)))
+        })
+        .collect();
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        CAPTION,
+        Style::new().fg(theme::ROSE_DIM),
+    )));
+
+    let [band] = Layout::vertical([Constraint::Length(art_h)])
+        .flex(Flex::Center)
+        .areas(area);
+    frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), band);
+}
+
 /// Word-wrap `text` to `width` display columns for the articles list, breaking on
 /// whitespace and hard-splitting any single word wider than the line. Widths use
 /// Unicode display width (matching how the terminal measures cells), so wrapped
@@ -764,7 +861,8 @@ fn reader_text(entry: &Entry, feed: &str, images: &HashMap<String, ImageState>) 
             .title
             .clone()
             .unwrap_or_else(|| "(untitled)".to_string())
-            .bold(),
+            .bold()
+            .fg(theme::ROSE),
     ));
     let meta = match &entry.published {
         Some(published) => format!("{feed} · {published}"),
@@ -1864,5 +1962,143 @@ mod tests {
             content(y)
         );
         assert!(!reversed(y), "the unselected next item is not highlighted");
+    }
+
+    #[test]
+    fn accent_is_applied_to_focused_chrome_and_selection() {
+        let mut app = app_with(&[(9, "Hacker News", 2)]);
+        app.focus_right(); // focus Articles (x∈[30,72)); Sources stays unfocused
+        let backend = ratatui::backend::TestBackend::new(120, 20);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let cell = |x: u16, y: u16| buffer.cell((x, y)).unwrap();
+
+        // Focused pane's border is rose; the unfocused pane's border stays neutral.
+        assert_eq!(
+            cell(50, 0).fg,
+            theme::ROSE,
+            "focused (Articles) border is rose"
+        );
+        assert_eq!(
+            cell(15, 0).fg,
+            ratatui::style::Color::Reset,
+            "unfocused (Sources) border stays neutral — accent is restrained"
+        );
+        // The selection bar is rose AND still reversed (keeps the existing contract).
+        let selected = cell(32, 1);
+        assert_eq!(selected.fg, theme::ROSE, "selection bar is rose");
+        assert!(
+            selected
+                .modifier
+                .contains(ratatui::style::Modifier::REVERSED),
+            "selection stays reversed"
+        );
+        // The reader title is rose.
+        assert_eq!(cell(74, 1).fg, theme::ROSE, "reader title is rose");
+    }
+
+    #[test]
+    fn footer_keys_are_accented() {
+        let mut app = app_with(&[(9, "Hacker News", 1)]);
+        let backend = ratatui::backend::TestBackend::new(120, 20);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        // At least one footer key letter is rose (footer is the last row).
+        let has_rose = (0..120).any(|x| buffer.cell((x, 19)).unwrap().fg == theme::ROSE);
+        assert!(has_rose, "footer key letters are accented rose");
+        // The help wording is intact (e.g. the 'quit' label).
+        let rendered: String = buffer
+            .content
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect();
+        assert!(rendered.contains("quit"), "footer help text preserved");
+    }
+
+    #[test]
+    fn all_caught_up_shows_the_rose() {
+        let mut app = App::new();
+        app.apply(Msg::Loaded(Ok(Loaded {
+            entries: vec![],
+            feed_titles: HashMap::new(),
+            total_unread: 0,
+        }))); // Ready + empty → the rose splash
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let rendered: String = buffer
+            .content
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect();
+        assert!(
+            rendered.contains("All caught up"),
+            "caught-up caption shown"
+        );
+        assert!(
+            !rendered.contains("Sources"),
+            "no three-column chrome on the splash"
+        );
+        assert!(
+            !rendered.contains("Articles"),
+            "no three-column chrome on the splash"
+        );
+        // The art/caption is colored (a rose-family RGB foreground appears).
+        let has_rose = buffer
+            .content
+            .iter()
+            .any(|c| matches!(c.fg, ratatui::style::Color::Rgb(r, _, b) if r > 0x80 && b > 0x40));
+        assert!(has_rose, "the rose splash is colored");
+    }
+
+    #[test]
+    fn loading_first_frame_is_unchanged() {
+        let mut app = App::new(); // Loading + empty
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect();
+        assert!(
+            rendered.contains("Loading"),
+            "loading still shows its placeholder"
+        );
+        assert!(
+            !rendered.contains("All caught up"),
+            "the rose is reserved for the caught-up state, not loading"
+        );
+    }
+
+    #[test]
+    fn caught_up_degrades_on_a_tiny_terminal() {
+        let mut app = App::new();
+        app.apply(Msg::Loaded(Ok(Loaded {
+            entries: vec![],
+            feed_titles: HashMap::new(),
+            total_unread: 0,
+        })));
+        // Far too small for the art — must fall back to the caption without panicking.
+        let backend = ratatui::backend::TestBackend::new(10, 3);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect();
+        assert!(
+            rendered.contains("All"),
+            "tiny terminal still shows the caption"
+        );
     }
 }

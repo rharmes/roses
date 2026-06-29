@@ -17,6 +17,7 @@ the build-out plan are in [`tui_research.md`](tui_research.md); CI is in [`ci.md
 | `tui` | The full-screen ratatui app: state (`App`), event loop, rendering, async orchestration. |
 | `images` | Fetch + render images to Unicode half-block art (`▀`). |
 | `browser` | Resolve and launch the user's browser for an article URL. |
+| `theme` | The rose color palette (truecolor `Rgb` consts + a `lerp` for the gradient). |
 
 There is no `lib.rs`; everything is a private module of the binary except items marked `pub` for
 cross-module use within the crate.
@@ -134,6 +135,23 @@ don't overflow). Items render contiguously (no inter-item blank line — removed
 whole article is one item, `List` keeps navigation per-article and highlights the entire wrapped item
 (it applies `highlight_style` across the full item height) — so `↑`/`↓` still step article-by-article,
 never line-by-line.
+
+### Theme & whimsy (TASK-14)
+
+A single **rose accent** (`theme::ROSE`) is applied to *chrome only*, so just the active element draws
+the eye: the **focused** pane's border + title (`column_block`), the **selection bar**
+(`highlight` = `fg(ROSE).reversed()` — the reverse swaps rose onto the background, and keeps the
+`REVERSED` modifier the tests rely on), the **reader title**, and the footer's **key letters**
+(`footer_help()`; arrows/labels stay dim). Feed names, article titles, counts, meta, url, and body stay
+neutral. The palette lives in `theme` (truecolor `Rgb`; non-truecolor terminals downsample, and the
+bold/dim/reversed modifiers still carry focus/selection).
+
+When nothing is unread (`Status::Ready` + empty `entries`), `draw()` short-circuits to `draw_caught_up()`
+instead of the three columns: a vertically-centered ASCII rose with petals graded light→deep rose
+(`theme::lerp`) over a green stem, and an *All caught up.* caption. The footer is always drawn. The art
+rows are equal width so `Alignment::Center` keeps the bloom aligned while centering it; if the area is
+too small for the art it degrades to just the centered caption. Loading and `Failed` states are unchanged
+(their text still lives in the Sources pane).
 
 ### Keybindings
 
