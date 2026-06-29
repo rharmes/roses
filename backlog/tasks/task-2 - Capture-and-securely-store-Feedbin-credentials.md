@@ -1,11 +1,11 @@
 ---
 id: TASK-2
 title: Capture and securely store Feedbin credentials
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-06-29 00:56'
-updated_date: '2026-06-29 13:32'
+updated_date: '2026-06-29 14:05'
 labels:
   - poc
   - rust
@@ -25,10 +25,10 @@ Prompt for the user's Feedbin email and password on first run and store them saf
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 First run prompts for email and password, with the password entry hidden (e.g. rpassword)
-- [ ] #2 Password is stored in the OS keychain via the keyring crate (macOS Keychain / Linux Secret Service)
+- [x] #1 First run prompts for email and password, with the password entry hidden (e.g. rpassword)
+- [x] #2 Password is stored in the OS keychain via the keyring crate (macOS Keychain / Linux Secret Service)
 - [x] #3 Email and non-secret settings are saved as TOML under XDG_CONFIG_HOME/roses (honoring the env var, default ~/.config)
-- [ ] #4 Subsequent runs load the credential from the keychain without re-prompting; a logout path can clear it
+- [x] #4 Subsequent runs load the credential from the keychain without re-prompting; a logout path can clear it
 - [x] #5 No secret is written to the repo or any plaintext file; the config path is gitignored
 <!-- AC:END -->
 
@@ -254,4 +254,12 @@ Automated verification (all pass):
 
 AC status: #3 (XDG/TOML) and #5 (no secret on disk, gitignored) VERIFIED and checked.
 #1 (interactive email + hidden password prompt), #2 (live keychain store), #4 (no-reprompt reload + logout-clears) are IMPLEMENTED but need an interactive TTY + the live Feedbin account to verify end-to-end — that's the user's step. Once that passes, check #1/#2/#4 and mark Done, then start TASK-3.
+
+User verified the interactive flow against their live Feedbin account (2026-06-29): AC#1 first run prompts email + hidden password; AC#2 password lands in the macOS Keychain via keyring; AC#4 second run reloads from the keychain with NO re-prompt and 'roses logout' clears the entry. All 5 ACs now pass.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Implemented Feedbin credential capture + secure storage. src/config.rs stores the email and non-secret settings as TOML under XDG_CONFIG_HOME/roses (default ~/.config/roses) and the password in the OS keychain via keyring v4; exposes login()/logout()/load_credentials() with a pure, unit-tested XDG resolver. src/main.rs does load-or-prompt with a 'logout' subcommand. config.toml is gitignored and a unit test asserts the settings TOML never carries a password. Verified: cargo fmt --check, build, clippy -D warnings, 5 unit tests, plus the user's interactive run (prompt -> keychain store -> no-reprompt reload -> logout clears). Committed on rust-poc (8cc2276).
+<!-- SECTION:FINAL_SUMMARY:END -->
