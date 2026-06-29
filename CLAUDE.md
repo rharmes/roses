@@ -33,8 +33,9 @@ CI mirrors these: every push and PR must pass `cargo fmt --all --check`,
 those three before pushing — see `docs/ci.md` for the pipeline walkthrough.
 
 Source layout under `src/`: `config` (settings + keychain credentials),
-`feedbin` (Feedbin API client), `ui` (output — stdout now, ratatui later).
-Stack rationale and the build-out plan live in `docs/tui_research.md`.
+`feedbin` (Feedbin API client), `ui` (plain-stdout list — `roses list`),
+`tui` (full-screen ratatui app — the default `roses`). Stack rationale and
+the build-out plan live in `docs/tui_research.md`.
 
 <!-- BACKLOG.MD GUIDELINES START -->
 <CRITICAL_INSTRUCTION>

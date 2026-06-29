@@ -23,17 +23,23 @@ const MAX_IDS_PER_REQUEST: usize = 100;
 
 const USER_AGENT: &str = concat!("roses/", env!("CARGO_PKG_VERSION"));
 
-/// A hydrated Feedbin entry. Feedbin sends `title`, `url`, and `published` as
-/// nullable, so they are `Option` to avoid panicking on real-world data
-/// (AC #5). Extra response fields (content, summary, author, …) are ignored.
+/// A hydrated Feedbin entry. Feedbin sends `title`, `url`, `published`,
+/// `summary`, and `content` as nullable, so they are `Option` to avoid
+/// panicking on real-world data (AC #5). Other response fields (author,
+/// enclosure, …) are ignored. `content` is HTML; the reader pane renders it to
+/// text. Remaining fields beyond these are ignored by serde.
 #[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)] // `id` feeds the read/unread sync in TASK-7; the rest render in `ui`
+#[allow(dead_code)] // `id` feeds the read/unread sync in TASK-7
 pub struct Entry {
     pub id: i64,
     pub feed_id: i64,
     pub title: Option<String>,
     pub url: Option<String>,
     pub published: Option<String>,
+    /// Short plain-ish summary; falls back here when `content` is absent.
+    pub summary: Option<String>,
+    /// Full entry body as HTML (rendered to text by the reader pane).
+    pub content: Option<String>,
 }
 
 /// One Feedbin subscription. Used only to map a `feed_id` to its display title;
@@ -44,7 +50,10 @@ struct Subscription {
     title: Option<String>,
 }
 
-/// A blocking Feedbin v2 client bound to one set of credentials.
+/// A blocking Feedbin v2 client bound to one set of credentials. Cloning is
+/// cheap (the inner `reqwest` client is reference-counted) and lets the TUI
+/// move a copy into a background `spawn_blocking` fetch.
+#[derive(Clone)]
 pub struct Client {
     http: reqwest::blocking::Client,
     base_url: String,
