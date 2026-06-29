@@ -120,6 +120,13 @@ so it survives entries being added/removed by mark/undo. `ListState` indices are
 those ids. Display order: **sources by feed name**; **articles oldest-first** (`articles()` reverses the
 newest-first `entries`).
 
+All three panes share `column_block()`, which adds a `Padding::horizontal(1)` inset (TASK-12) so content
+doesn't sit flush against the border — one cell of horizontal breathing room (no top/bottom inset),
+consistent across the columns. Because the padding lives on the shared block, any geometry that needs the
+true content rect derives it from `block.inner(area)` (which accounts for border **and** padding) rather
+than a hardcoded `area − 2`: the reader's scroll clamp and the `reader_width` used to size pre-fetched
+image art both do this, so they stay correct as the padding changes.
+
 ### Keybindings
 
 | Key(s) | Action |
@@ -159,7 +166,8 @@ hostile feed can't inject terminal escape sequences; collapses blank lines), and
 
 Reader scroll is clamped to the **wrapped** height via `Paragraph::line_count(inner_width)` (needs
 ratatui's `unstable-rendered-line-info` feature) — clamping to the raw line count pinned long
-word-wrapped paragraphs at the top (a fixed bug; regression-tested).
+word-wrapped paragraphs at the top (a fixed bug; regression-tested). `inner_width`/`inner_height` come
+from `block.inner(area)`, so the clamp stays correct under the pane padding.
 
 ### Image pre-fetch (TASK-8)
 
