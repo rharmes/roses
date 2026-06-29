@@ -1,11 +1,11 @@
 ---
 id: TASK-4
 title: Display fetched Feedbin entries as basic stdout output
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-06-29 00:56'
-updated_date: '2026-06-29 14:22'
+updated_date: '2026-06-29 14:27'
 labels:
   - poc
   - rust
@@ -26,7 +26,7 @@ Tie the proof-of-concept together: using the stored credentials and the Feedbin 
 - [x] #1 Running roses after login prints a list of unread entry titles, each with its feed name
 - [x] #2 Output is readable plain text on stdout (no TUI yet)
 - [x] #3 The empty case (no unread entries) is handled gracefully with a friendly message
-- [ ] #4 Verified end-to-end against a live Feedbin account
+- [x] #4 Verified end-to-end against a live Feedbin account
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -44,4 +44,12 @@ Implemented the stdout renderer end to end.
 - main.rs: authenticate -> unread IDs -> if empty print the friendly message; else fetch feed_titles, take the newest DISPLAY_LIMIT=20 (IDs sorted desc), hydrate, sort by published desc, print. Entry's dead_code allow narrowed to just 'id' (reserved for TASK-7's read/unread sync).
 
 Verification: cargo fmt --check clean; clippy --all-targets -- -D warnings clean; 15 tests pass (3 new ui + 1 new feedbin), stable across 10 back-to-back runs. AC#1-3 are covered by unit tests + design and are checked. AC#4 (live end-to-end) is the user's run: 'cargo run' against the real Feedbin account should print their newest unread entries with feed names.
+
+AC#4 finalized on the user's explicit instruction ('mark it done now') without a recorded live run in this session. The credentials -> API -> render path is exercised by the mockito-backed client tests plus the ui tests; a live 'cargo run' remains available as a spot check whenever the user wants it.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Rendered unread Feedbin entries as readable plain stdout, completing the PoC's credentials -> API -> output path. Added feedbin::feed_titles() (subscriptions.json -> feed_id->name map) and a pure, unit-tested ui::format_unread() that prints a 'showing X of Y' header with per-entry 'title' / 'feed · url' lines and a friendly all-caught-up message for the empty case. main.rs authenticates, fetches unread IDs, hydrates the newest 20, and prints newest-first. Verified by cargo fmt, clippy -D warnings, and 15 unit tests (4 new) stable across 10 runs; AC#1-3 unit-tested. AC#4 (live account) finalized on the user's go-ahead. Committed on rust-poc (358cfd7).
+<!-- SECTION:FINAL_SUMMARY:END -->
