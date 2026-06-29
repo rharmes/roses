@@ -640,10 +640,9 @@ impl App {
             return;
         };
         // Wrap each title to the pane's current inner width (recomputed every draw,
-        // so resizes reflow) and append a trailing blank line as the inter-item
-        // gap. Each article is one multi-line `ListItem`, so navigation and the
-        // selection highlight stay per-article — `List` highlights the whole item
-        // (TASK-13).
+        // so resizes reflow). Each article is one multi-line `ListItem`, so
+        // navigation and the selection highlight stay per-article — `List`
+        // highlights the whole item (TASK-13).
         let width = block.inner(area).width;
         let items: Vec<ListItem> = self
             .articles(feed_id)
@@ -655,11 +654,10 @@ impl App {
                     .map(str::trim)
                     .filter(|t| !t.is_empty())
                     .unwrap_or("(untitled)");
-                let mut lines: Vec<Line> = wrap_title(title, width)
+                let lines: Vec<Line> = wrap_title(title, width)
                     .into_iter()
                     .map(Line::from)
                     .collect();
-                lines.push(Line::from(""));
                 ListItem::new(Text::from(lines))
             })
             .collect();
@@ -1796,7 +1794,7 @@ mod tests {
     }
 
     #[test]
-    fn article_titles_wrap_space_apart_and_highlight_whole_item() {
+    fn article_titles_wrap_and_highlight_covers_the_whole_item() {
         // Two articles in one source; the oldest (selected) has a title that must
         // wrap at the narrow pane width.
         let mut feed_titles = HashMap::new();
@@ -1826,27 +1824,30 @@ mod tests {
 
         // Width 40: Articles pane is x∈[10,24); inner content is cols [12,22),
         // 10 wide, starting at row 1 (no top inset). "Alpha Bravo" wraps to two
-        // lines at width 10.
+        // lines at width 10, and items render contiguously (no blank gap).
         let backend = ratatui::backend::TestBackend::new(40, 20);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         terminal.draw(|frame| app.draw(frame)).unwrap();
         let buffer = terminal.backend().buffer();
-        let content = |y: u16| {
-            (12u16..22)
-                .map(|x| buffer.cell((x, y)).unwrap().symbol())
-                .collect::<String>()
+        let cell = |x: u16, y: u16| buffer.cell((x, y)).unwrap();
+        let content = |y: u16| (12u16..22).map(|x| cell(x, y).symbol()).collect::<String>();
+        let reversed = |y: u16| {
+            cell(12, y)
+                .modifier
+                .contains(ratatui::style::Modifier::REVERSED)
         };
 
-        // The selected title's wrapped lines are the leading non-blank rows.
+        // No blank separator now, so the highlight delimits the selected item: its
+        // wrapped lines are the leading contiguous highlighted rows (AC#3).
         let mut title_rows = Vec::new();
         let mut y = 1u16;
-        while y < 18 && !content(y).trim().is_empty() {
+        while y < 18 && reversed(y) {
             title_rows.push(y);
             y += 1;
         }
         assert!(
             title_rows.len() >= 2,
-            "the long title wrapped onto multiple lines, got rows {title_rows:?}"
+            "the long title wrapped onto multiple highlighted lines, got {title_rows:?}"
         );
         // The full title is visible across those lines — no truncation (AC#1).
         let joined = title_rows
@@ -1855,24 +1856,13 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" ");
         assert_eq!(joined, "Alpha Bravo");
-        // A blank line separates this item from the next (AC#2)…
-        assert_eq!(content(y).trim(), "", "blank gap row after the item");
-        // …and the next article follows after the gap.
+        // The next article follows immediately — items are contiguous (no gap) and
+        // the unselected item is not highlighted.
         assert!(
-            content(y + 1).starts_with("Second"),
-            "next item after the gap: {:?}",
-            content(y + 1)
+            content(y).starts_with("Second"),
+            "next item directly follows: {:?}",
+            content(y)
         );
-        // The selection highlight covers every wrapped line of the item (AC#3).
-        for &r in &title_rows {
-            assert!(
-                buffer
-                    .cell((12, r))
-                    .unwrap()
-                    .modifier
-                    .contains(ratatui::style::Modifier::REVERSED),
-                "selected item highlighted on wrapped row {r}"
-            );
-        }
+        assert!(!reversed(y), "the unselected next item is not highlighted");
     }
 }
