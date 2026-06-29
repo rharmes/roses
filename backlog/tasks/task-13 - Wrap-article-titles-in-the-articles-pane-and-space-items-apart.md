@@ -1,11 +1,11 @@
 ---
 id: TASK-13
 title: Wrap article titles in the articles pane and space items apart
-status: In Progress
+status: Done
 assignee:
   - '@ross'
 created_date: '2026-06-29 20:00'
-updated_date: '2026-06-29 21:20'
+updated_date: '2026-06-29 21:31'
 labels:
   - rust
   - ui
@@ -47,3 +47,9 @@ Implemented in draw_articles: each article is a multi-line ListItem = wrap_title
 
 User direction after eyeballing: removed the trailing blank line from each article ListItem, so articles now render contiguously (kept the wrapping + per-item highlight). This intentionally drops AC#2 (inter-item spacing) — the user prefers no gap over the highlighted 'card' gap. Unchecked AC#2 to stay accurate; AC#1 (wrap, no truncation) and AC#3 (per-article nav + whole-item highlight) still hold. Updated the render test to delimit the selected item by its highlight instead of a blank row, and asserts items are contiguous. docs/architecture.md updated. 60 tests, stable 10/10.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Article titles in the Articles pane now wrap across as many lines as needed (no truncation): each article is one multi-line ListItem built from wrap_title(title, block.inner(area).width) — word-wrapping on whitespace, hard-breaking overlong words, measuring display width via unicode-width (promoted from transitive to a direct dep), recomputed each draw so resizes reflow. Because a whole article is one item, ratatui's List keeps navigation per-article and applies highlight_style across the full item height, so up/down step article-by-article and the selection highlight covers the entire wrapped item. AC#1 and AC#3 met. AC#2 (inter-item spacing) was implemented as a trailing blank line, then removed at the user's request after review — articles render contiguously, so AC#2 is intentionally not met (the user prefers no gap over a highlighted-gap 'card' look). Verified: cargo fmt --check, clippy --all-targets -D warnings, 60 tests pass (4 wrap_title unit tests + render test article_titles_wrap_and_highlight_covers_the_whole_item), stable 10/10, CI green. docs/architecture.md updated (layout + dependency table).
+<!-- SECTION:FINAL_SUMMARY:END -->
