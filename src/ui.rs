@@ -66,6 +66,8 @@ mod tests {
             title: title.map(str::to_string),
             url: url.map(str::to_string),
             published: None,
+            summary: None,
+            content: None,
         }
     }
 
