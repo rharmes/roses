@@ -28,6 +28,10 @@
 - `cargo test` — run tests
 - `cargo fmt` — format; `cargo clippy` — lint
 
+CI mirrors these: every push and PR must pass `cargo fmt --all --check`,
+`cargo clippy --all-targets -- -D warnings`, and `cargo test --locked`. Run
+those three before pushing — see `docs/ci.md` for the pipeline walkthrough.
+
 Source layout under `src/`: `config` (settings + keychain credentials),
 `feedbin` (Feedbin API client), `ui` (output — stdout now, ratatui later).
 Stack rationale and the build-out plan live in `docs/tui_research.md`.
