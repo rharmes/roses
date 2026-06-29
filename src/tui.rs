@@ -527,8 +527,17 @@ impl App {
         };
 
         let text = reader_text(entry, self.feed_name(entry.feed_id));
-        let visible = area.height.saturating_sub(2);
-        let max_scroll = (text.lines.len() as u16).saturating_sub(visible);
+        let inner_width = area.width.saturating_sub(2);
+        let inner_height = area.height.saturating_sub(2);
+
+        // Clamp scroll to the *wrapped* height (not the raw line count): one long
+        // paragraph is a single line that word-wraps to many rows, so clamping on
+        // `text.lines.len()` would pin the reader at the top. Measure without the
+        // block so `inner_width` is the true content width.
+        let wrapped = Paragraph::new(text.clone())
+            .wrap(Wrap { trim: false })
+            .line_count(inner_width) as u16;
+        let max_scroll = wrapped.saturating_sub(inner_height);
         self.reader_scroll = self.reader_scroll.min(max_scroll);
 
         let reader = Paragraph::new(text)
@@ -1043,6 +1052,43 @@ mod tests {
         assert!(rendered.contains("Hacker News"), "source name shown");
         assert!(rendered.contains("Body"), "reader shows the article body");
         assert!(rendered.contains("quit"), "footer help shown");
+    }
+
+    #[test]
+    fn reader_scrolls_long_wrapped_content() {
+        // One long paragraph with no newlines: few *unwrapped* lines, but it
+        // word-wraps to many rows — so it must still be scrollable. (Regression
+        // for clamping scroll against the raw line count instead of the wrapped
+        // height, which pinned the reader at the top.)
+        let long = "word ".repeat(300);
+        let mut feed_titles = HashMap::new();
+        feed_titles.insert(9, "Feed".to_string());
+        let entry = Entry {
+            id: 1,
+            feed_id: 9,
+            title: Some("T".to_string()),
+            url: None,
+            published: None,
+            summary: None,
+            content: Some(format!("<p>{long}</p>")),
+        };
+        let mut app = App::new();
+        app.apply(Msg::Loaded(Ok(Loaded {
+            entries: vec![entry],
+            feed_titles,
+            total_unread: 1,
+        })));
+        app.focus_right();
+        app.focus_right(); // Reader
+
+        let backend = ratatui::backend::TestBackend::new(40, 8);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        app.move_cursor(1); // scroll down one line
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert_eq!(
+            app.reader_scroll, 1,
+            "overflowing wrapped content must scroll, not clamp to 0"
+        );
     }
 
     #[test]
