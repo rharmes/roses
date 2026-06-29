@@ -20,6 +20,8 @@ use ratatui::{DefaultTerminal, Frame};
 use tokio::runtime::Handle;
 use tokio::sync::mpsc::{self, UnboundedSender};
 
+use crate::browser;
+use crate::config::BrowserPref;
 use crate::feedbin::{Client, Entry};
 
 /// How many of the newest unread entries to load.
@@ -70,6 +72,7 @@ enum Action {
     Reload,
     MarkRead,
     Undo,
+    OpenInBrowser,
 }
 
 /// Which column the cursor is in.
@@ -166,6 +169,11 @@ impl App {
     fn selected_article_entry(&self) -> Option<&Entry> {
         let id = self.selected_article?;
         self.entries.iter().find(|e| e.id == id)
+    }
+
+    /// The URL of the selected article, if any (for opening in a browser).
+    fn selected_url(&self) -> Option<String> {
+        self.selected_article_entry().and_then(|e| e.url.clone())
     }
 
     fn source_index(&self) -> Option<usize> {
@@ -412,6 +420,7 @@ impl App {
             }
             KeyCode::Char('m') => return Action::MarkRead,
             KeyCode::Char('u') => return Action::Undo,
+            KeyCode::Char('o') => return Action::OpenInBrowser,
             KeyCode::Char('r') => return Action::Reload,
             _ => {}
         }
@@ -436,7 +445,10 @@ impl App {
 
         let footer_line = match &self.notice {
             Some(text) => Line::from(format!(" {text} ")).red(),
-            None => Line::from(" ↑↓ move · ←→ focus · m read · u undo · r reload · q quit ").dim(),
+            None => {
+                Line::from(" ↑↓ move · ←→ focus · m read · u undo · o open · r reload · q quit ")
+                    .dim()
+            }
         };
         frame.render_widget(footer_line, footer);
     }
@@ -798,12 +810,13 @@ pub fn run(client: Client) -> Result<()> {
         .build()
         .context("building the Tokio runtime")?;
     let handle = runtime.handle().clone();
+    let browser_pref = crate::config::load_browser_pref().unwrap_or_default();
 
     let (tx, mut rx) = mpsc::unbounded_channel::<Msg>();
     spawn_fetch(&handle, client.clone(), tx.clone());
 
     let mut terminal = ratatui::init();
-    let result = run_loop(&mut terminal, &handle, &client, &tx, &mut rx);
+    let result = run_loop(&mut terminal, &handle, &client, &tx, &mut rx, &browser_pref);
     ratatui::restore();
     result
 }
@@ -814,6 +827,7 @@ fn run_loop(
     client: &Client,
     tx: &UnboundedSender<Msg>,
     rx: &mut mpsc::UnboundedReceiver<Msg>,
+    browser_pref: &BrowserPref,
 ) -> Result<()> {
     let mut app = App::new();
     while !app.should_quit {
@@ -844,10 +858,49 @@ fn run_loop(
                         spawn_write(handle, client, tx, WriteOp::Undo, entry, index);
                     }
                 }
+                Action::OpenInBrowser => open_selected(terminal, &mut app, browser_pref),
             }
         }
     }
     Ok(())
+}
+
+/// Open the selected article's URL, suspending the TUI around a terminal browser
+/// so it can take over the screen (AC #3), then restoring it.
+fn open_selected(terminal: &mut DefaultTerminal, app: &mut App, pref: &BrowserPref) {
+    let Some(url) = app.selected_url() else {
+        app.notice = Some("No URL for this entry.".to_string());
+        return;
+    };
+    let launch = browser::resolve(pref, std::env::var("BROWSER").ok().as_deref(), &url);
+    let result = if launch.terminal {
+        suspend_and_run(terminal, &launch)
+    } else {
+        browser::run(&launch)
+    };
+    if let Err(err) = result {
+        app.notice = Some(format!("Browser failed: {err:#}"));
+    }
+}
+
+/// Leave the alt screen + raw mode, run a terminal browser to completion, then
+/// restore the TUI and force a full redraw.
+fn suspend_and_run(terminal: &mut DefaultTerminal, launch: &browser::Launch) -> Result<()> {
+    use ratatui::crossterm::execute;
+    use ratatui::crossterm::terminal::{
+        EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    };
+
+    let mut stdout = std::io::stdout();
+    disable_raw_mode().context("leaving raw mode")?;
+    execute!(stdout, LeaveAlternateScreen).context("leaving the alternate screen")?;
+
+    let result = browser::run(launch);
+
+    enable_raw_mode().context("re-entering raw mode")?;
+    execute!(stdout, EnterAlternateScreen).context("re-entering the alternate screen")?;
+    terminal.clear().context("clearing the terminal")?;
+    result
 }
 
 #[cfg(test)]

@@ -2282,6 +2282,7 @@ dependencies = [
  "reqwest",
  "rpassword",
  "serde",
+ "shlex",
  "tokio",
  "toml",
 ]
