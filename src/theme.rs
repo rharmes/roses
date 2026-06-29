@@ -12,8 +12,6 @@ pub const ROSE: Color = Color::Rgb(0xE0, 0x6C, 0x9A);
 pub const ROSE_LIGHT: Color = Color::Rgb(0xF2, 0xA9, 0xC4);
 /// Bottom of the petal gradient (deepest).
 pub const ROSE_DEEP: Color = Color::Rgb(0xB0, 0x39, 0x5B);
-/// Muted rose for captions / secondary text.
-pub const ROSE_DIM: Color = Color::Rgb(0x9E, 0x4B, 0x6C);
 /// Green stem/leaf in the rose art.
 pub const LEAF: Color = Color::Rgb(0x6B, 0x9E, 0x78);
 

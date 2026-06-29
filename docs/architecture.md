@@ -144,14 +144,15 @@ never line-by-line.
 A single **rose accent** (`theme::ROSE`) is applied to *chrome only*, so just the active element draws
 the eye: the **focused** pane's border + title (`column_block`), the **selection bar**
 (`highlight` = `fg(ROSE).reversed()` — the reverse swaps rose onto the background, and keeps the
-`REVERSED` modifier the tests rely on), the **reader title**, and the footer's **key letters**
-(`footer_help()`; arrows/labels stay dim). Feed names, article titles, counts, meta, url, and body stay
-neutral. The palette lives in `theme` (truecolor `Rgb`; non-truecolor terminals downsample, and the
+`REVERSED` modifier the tests rely on), the **reader title**, and the footer's **keys** — the action
+letters and the arrow glyphs (`footer_help()`; the word labels stay dim). Feed names, article titles,
+counts, meta, url, and body stay neutral. The palette lives in `theme` (truecolor `Rgb`; non-truecolor terminals downsample, and the
 bold/dim/reversed modifiers still carry focus/selection).
 
 When nothing is unread (`Status::Ready` + empty `entries`), `draw()` short-circuits to `draw_caught_up()`
 instead of the three columns: a vertically-centered ASCII rose with petals graded light→deep rose
-(`theme::lerp`) over a green stem, and an *All caught up.* caption. The footer is always drawn. The art
+(`theme::lerp`) over a green stem, and an *All caught up.* caption in the default text color. The footer
+is always drawn. The art
 rows are equal width so `Alignment::Center` keeps the bloom aligned while centering it; if the area is
 too small for the art it degrades to just the centered caption. Loading and `Failed` states are unchanged
 (their text still lives in the Sources pane).

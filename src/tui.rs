@@ -728,7 +728,11 @@ fn footer_help() -> Line<'static> {
     let key = |k: &'static str| Span::styled(k, Style::new().fg(theme::ROSE).bold());
     let text = |s: &'static str| Span::raw(s).dim();
     Line::from(vec![
-        text(" ↑↓ move · ←→ focus · "),
+        text(" "),
+        key("↑↓"),
+        text(" move · "),
+        key("←→"),
+        text(" focus · "),
         key("m"),
         text(" read · "),
         key("u"),
@@ -773,7 +777,7 @@ fn draw_caught_up(frame: &mut Frame, area: Rect) {
         let [band] = Layout::vertical([Constraint::Length(1)])
             .flex(Flex::Center)
             .areas(area);
-        let caption = Line::from(Span::styled(CAPTION, Style::new().fg(theme::ROSE_DIM)));
+        let caption = Line::from(CAPTION);
         frame.render_widget(Paragraph::new(caption).alignment(Alignment::Center), band);
         return;
     }
@@ -794,10 +798,7 @@ fn draw_caught_up(frame: &mut Frame, area: Rect) {
         })
         .collect();
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        CAPTION,
-        Style::new().fg(theme::ROSE_DIM),
-    )));
+    lines.push(Line::from(CAPTION));
 
     let [band] = Layout::vertical([Constraint::Length(art_h)])
         .flex(Flex::Center)
@@ -2035,6 +2036,11 @@ mod tests {
         // At least one footer key letter is rose (footer is the last row).
         let has_rose = (0..120).any(|x| buffer.cell((x, 19)).unwrap().fg == theme::ROSE);
         assert!(has_rose, "footer key letters are accented rose");
+        // The arrow glyphs are accented too (rose), not just the letters: the line
+        // is " ↑↓ …", so the up arrow sits at column 1.
+        let arrow = buffer.cell((1, 19)).unwrap();
+        assert_eq!(arrow.symbol(), "↑", "first footer glyph is the up arrow");
+        assert_eq!(arrow.fg, theme::ROSE, "arrow keys are accented rose too");
         // The help wording is intact (e.g. the 'quit' label).
         let rendered: String = buffer
             .content
