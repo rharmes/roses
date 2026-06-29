@@ -15,7 +15,7 @@ use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, List, ListItem, ListState, Padding, Paragraph, Wrap};
 use ratatui::{DefaultTerminal, Frame};
 use tokio::runtime::Handle;
 use tokio::sync::mpsc::{self, UnboundedSender};
@@ -550,7 +550,9 @@ impl App {
 
         // Record the reader's content width every frame so background image
         // pre-fetches size their art to fit even before the reader is opened.
-        self.reader_width = reader.width.saturating_sub(2);
+        // Mirror draw_reader's inner rect (border + padding) so the art width
+        // matches the real content area.
+        self.reader_width = self.column_block("Reader", false).inner(reader).width;
 
         self.draw_sources(frame, sources);
         self.draw_articles(frame, articles);
@@ -572,7 +574,15 @@ impl App {
         } else {
             Style::new().dim()
         };
-        Block::bordered().title(title).border_style(border)
+        // Inset the content from the border for breathing room (TASK-12): ~1 cell
+        // horizontally + a modest 1-row top/bottom inset, applied to every pane via
+        // this shared block so the padding stays consistent. `draw_reader` derives
+        // its scroll bounds from `block.inner(area)`, so this padding is accounted
+        // for there automatically.
+        Block::bordered()
+            .title(title)
+            .border_style(border)
+            .padding(Padding::uniform(1))
     }
 
     /// Reversed text marks the active cursor; a bold row marks the remembered
@@ -660,8 +670,11 @@ impl App {
         };
 
         let text = reader_text(entry, self.feed_name(entry.feed_id), &self.images);
-        let inner_width = area.width.saturating_sub(2);
-        let inner_height = area.height.saturating_sub(2);
+        // The true content rect — inside the border *and* the padding (TASK-12) —
+        // sets the wrap width and visible height used to clamp the scroll offset.
+        let inner = block.inner(area);
+        let inner_width = inner.width;
+        let inner_height = inner.height;
 
         // Clamp scroll to the *wrapped* height (not the raw line count): one long
         // paragraph is a single line that word-wraps to many rows, so clamping on
@@ -1629,6 +1642,47 @@ mod tests {
             app.reader_scroll, 1,
             "overflowing wrapped content must scroll, not clamp to 0"
         );
+    }
+
+    #[test]
+    fn panes_inset_content_from_their_borders() {
+        // TASK-12: every pane insets its content one cell from the left border
+        // (horizontal padding) and one row below the top border (top inset),
+        // applied consistently through the shared column block.
+        let mut app = app_with(&[(9, "Hacker News", 2)]);
+        app.focus_right(); // focus Articles so the reader also shows a body
+        let backend = ratatui::backend::TestBackend::new(120, 20);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let sym = |x: u16, y: u16| buffer.cell((x, y)).unwrap().symbol().to_string();
+
+        // Left borders: Sources at x=0, Articles at x=30 (25% of 120), Reader at
+        // x=72 (25%+35%). Content is inset border(1) + padding(1) = 2 cells in,
+        // and one row down from the top border.
+        for left in [0u16, 30, 72] {
+            let content = left + 2;
+            assert_eq!(
+                sym(content, 1),
+                " ",
+                "top inset: row 1 is blank at column {content}"
+            );
+            assert_eq!(
+                sym(left + 1, 2),
+                " ",
+                "left padding: blank cell before content at column {}",
+                left + 1
+            );
+            assert_ne!(
+                sym(content, 2),
+                " ",
+                "content is present, inset from the border at column {content}"
+            );
+        }
+
+        // Spot-check the inset text itself in the Sources pane.
+        let name: String = (2..13).map(|x| sym(x, 2)).collect();
+        assert_eq!(name, "Hacker News", "source name inset by border + padding");
     }
 
     #[test]
