@@ -7,7 +7,7 @@
 //! columns. Feedbin is queried on a background `tokio::spawn_blocking` task so
 //! input never blocks; results arrive over a channel drained each tick.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -245,6 +245,35 @@ impl App {
     /// Pop the next image URL to fetch (already marked `Loading`).
     fn next_queued_image(&mut self) -> Option<String> {
         self.image_queue.pop_front()
+    }
+
+    /// Hybrid pre-fetch: keep the top-to-bottom base order, but if the focused
+    /// article still has images waiting in the queue (i.e. not yet fetched),
+    /// move just those to the front so an explicit jump pulls them forward.
+    /// Already-fetched / in-flight images aren't in the queue, so they're left
+    /// alone and sequential reading stays top-to-bottom.
+    fn prioritize_selected_images(&mut self) {
+        if self.image_queue.is_empty() {
+            return;
+        }
+        let Some(entry) = self.selected_article_entry() else {
+            return;
+        };
+        let wanted: HashSet<String> = self.article_image_urls(entry).into_iter().collect();
+        if wanted.is_empty() {
+            return;
+        }
+        let mut front = VecDeque::with_capacity(self.image_queue.len());
+        let mut rest = Vec::new();
+        for url in self.image_queue.drain(..) {
+            if wanted.contains(&url) {
+                front.push_back(url);
+            } else {
+                rest.push(url);
+            }
+        }
+        front.extend(rest);
+        self.image_queue = front;
     }
 
     fn source_index(&self) -> Option<usize> {
@@ -998,6 +1027,7 @@ fn run_loop(
 ) -> Result<()> {
     let mut app = App::new();
     let mut images_in_flight = 0usize;
+    let mut last_selected = None;
     while !app.should_quit {
         while let Ok(msg) = rx.try_recv() {
             if matches!(msg, Msg::Image { .. }) {
@@ -1009,7 +1039,12 @@ fn run_loop(
             .draw(|frame| app.draw(frame))
             .context("drawing the UI")?;
 
-        // Drain the pre-fetch queue (top-to-bottom) up to the concurrency cap.
+        // Bump the focused article's still-queued images to the front (only if
+        // not fetched yet), then drain the queue up to the concurrency cap.
+        if app.selected_article != last_selected {
+            last_selected = app.selected_article;
+            app.prioritize_selected_images();
+        }
         while images_in_flight < MAX_IMAGE_FETCHES {
             let Some(url) = app.next_queued_image() else {
                 break;
@@ -1524,6 +1559,38 @@ mod tests {
                 "banana-old".to_string(),
                 "banana-new".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn focusing_an_unfetched_article_bumps_it_to_the_front() {
+        let mut feed_titles = HashMap::new();
+        feed_titles.insert(7, "Feed".to_string());
+        // Stored newest-first; display (and base queue) is oldest-first: a, b, c.
+        let entries = vec![
+            img_entry(3, 7, "c"),
+            img_entry(2, 7, "b"),
+            img_entry(1, 7, "a"),
+        ];
+        let mut app = App::new();
+        app.apply(Msg::Loaded(Ok(Loaded {
+            entries,
+            feed_titles,
+            total_unread: 3,
+        })));
+        assert_eq!(
+            app.image_queue.iter().cloned().collect::<Vec<_>>(),
+            vec!["a".to_string(), "b".to_string(), "c".to_string()],
+            "base order is top-to-bottom"
+        );
+
+        // Jump to the bottom article (id 3); its still-queued image bumps front,
+        // the rest keep their top-to-bottom order.
+        app.selected_article = Some(3);
+        app.prioritize_selected_images();
+        assert_eq!(
+            app.image_queue.iter().cloned().collect::<Vec<_>>(),
+            vec!["c".to_string(), "a".to_string(), "b".to_string()]
         );
     }
 
