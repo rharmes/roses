@@ -1,11 +1,11 @@
 ---
 id: TASK-15
 title: Show a scrollbar in the reader pane when focused and overflowing
-status: In Progress
+status: Done
 assignee:
   - '@ross'
 created_date: '2026-06-29 23:31'
-updated_date: '2026-06-30 00:12'
+updated_date: '2026-06-30 00:17'
 labels:
   - rust
   - ui
@@ -48,3 +48,9 @@ Rebased onto main after TASK-14 merged (resolved the shared use ratatui::layout 
 
 UX tweak (user: held ↓ scrolled too slowly): reader ↑/↓ now scroll READER_SCROLL_STEP=3 lines per keypress instead of 1, so holding the arrow moves at a useful pace (held-scroll rate was capped at the OS key-repeat rate × 1 line). PgUp/PgDn still page by READER_PAGE=10. Updated the two tests asserting the old 1-line step (now READER_SCROLL_STEP) + the keybindings doc. 70 tests, stable 10/10.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Added a vertical scrollbar to the reader pane, shown only when the reader is the focused pane AND its wrapped content overflows the viewport (wrapped > inner_height). In draw_reader, after the Paragraph, render Scrollbar(VerticalRight) into area.inner(Margin{vertical:1}) so the track rides the right border between the corners (thumb █ over a │ track, no arrows); it reuses the existing wrapped/inner_height/reader_scroll scroll-clamp values. content_length is the count of scroll POSITIONS (max_scroll + 1), not the total line count — ratatui's thumb only reaches the bottom of the track when position == content_length-1, so the thumb now lands on the last track row at full scroll (a bug fix after initial review). Hidden when content fits or the reader isn't focused (a focused Articles pane still shows the article, just no bar). Also sped up reader scrolling: ↑/↓ now move READER_SCROLL_STEP=3 lines per press (was 1) so holding the arrow scrolls at a useful pace; PgUp/PgDn still page by READER_PAGE=10. Verified: cargo fmt --check, clippy --all-targets -D warnings, 70 tests (shows-when-focused+overflow, hidden-when-fits, hidden-when-unfocused, thumb-reaches-bottom-at-max-scroll; plus the two updated reader-scroll-step tests), stable 10/10, CI green. Branch rebased onto main after TASK-14 merged. docs/architecture.md updated (scrollbar mechanism + keybindings).
+<!-- SECTION:FINAL_SUMMARY:END -->
