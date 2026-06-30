@@ -161,7 +161,7 @@ too small for the art it degrades to just the centered caption. Loading and `Fai
 
 | Key(s) | Action |
 | --- | --- |
-| `↑`/`k`, `↓`/`j` | Move the cursor within the focused column (in Reader, scroll one line). |
+| `↑`/`k`, `↓`/`j` | Move the cursor within the focused column (in Reader, scroll a few lines — `READER_SCROLL_STEP`). |
 | `←`/`h`, `→`/`l` | Move focus across columns (preserving each column's cursor). |
 | `g`/`Home`, `G`/`End` | First / last in the focused column (or top/bottom of the reader). |
 | `PgUp`/`PgDn` | Page the reader (only when the reader is focused). |

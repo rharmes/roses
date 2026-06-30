@@ -33,6 +33,9 @@ use crate::theme;
 const DISPLAY_LIMIT: usize = 50;
 /// Lines the reader scrolls per PageUp/PageDown.
 const READER_PAGE: u16 = 10;
+/// Lines the reader scrolls per ↑/↓ (a few at a time, so holding the key moves at
+/// a useful pace rather than one line per key-repeat).
+const READER_SCROLL_STEP: u16 = 3;
 /// How long to wait for input before redrawing (also bounds how quickly a
 /// finished background task shows up).
 const TICK: Duration = Duration::from_millis(100);
@@ -366,9 +369,9 @@ impl App {
             Focus::Articles => self.move_article(delta),
             Focus::Reader => {
                 self.reader_scroll = if delta > 0 {
-                    self.reader_scroll.saturating_add(1)
+                    self.reader_scroll.saturating_add(READER_SCROLL_STEP)
                 } else {
-                    self.reader_scroll.saturating_sub(1)
+                    self.reader_scroll.saturating_sub(READER_SCROLL_STEP)
                 };
             }
         }
@@ -1511,7 +1514,7 @@ mod tests {
         app.focus_right(); // Reader
         assert_eq!(app.reader_scroll, 0);
         app.move_cursor(1);
-        assert_eq!(app.reader_scroll, 1);
+        assert_eq!(app.reader_scroll, READER_SCROLL_STEP);
         app.move_cursor(-1);
         assert_eq!(app.reader_scroll, 0);
     }
@@ -1852,10 +1855,10 @@ mod tests {
 
         let backend = ratatui::backend::TestBackend::new(40, 8);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        app.move_cursor(1); // scroll down one line
+        app.move_cursor(1); // scroll down one step
         terminal.draw(|frame| app.draw(frame)).unwrap();
         assert_eq!(
-            app.reader_scroll, 1,
+            app.reader_scroll, READER_SCROLL_STEP,
             "overflowing wrapped content must scroll, not clamp to 0"
         );
     }
