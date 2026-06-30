@@ -30,42 +30,45 @@ Set TypingSpeed 90ms
 
 # --- Launch roses (already authenticated to Feedbin) ---
 Type "roses"
-Sleep 600ms
+Sleep 2000ms
 Enter
 Sleep 3s              # let the newest unread entries load
 
 # --- Browse the Sources column (feeds + unread counts) ---
-Down@500ms 2
-Sleep 1200ms
+Down@400ms 4
+Sleep 1500ms
 
 # --- Focus the Articles column and skim a few titles ---
 Right
-Sleep 800ms
-Down@450ms 3
-Sleep 1200ms
+Sleep 1000ms
+Down@800ms 5
+Sleep 600ms
 
 # --- Focus the Reader and scroll the body (reveals the scrollbar) ---
 Right
-Sleep 800ms
-Down@180ms 12
+Sleep 600ms
+Down@100ms 13
 Sleep 1500ms
 
-# --- Mark read, then undo (non-destructive — restores the entry) ---
+# --- Back in the Articles column: scroll further down the list ---
 Left                  # back to the Articles column
-Sleep 600ms
-Type "m"              # mark the selected article read
-Sleep 1500ms
-Type "u"              # undo
-Sleep 1500ms
+Sleep 800ms
+Down@500ms 6
+Sleep 1600ms
+
+# --- Switch feeds: ← to Sources, ↑ to another feed, → into its articles and reader ---
+Left
+Sleep 800ms
+Up@400ms 3
+Sleep 800ms
+Right
+Sleep 800ms
+Down@500ms 2
+Sleep 800ms
+Right
+Sleep 800ms
+Down@300ms 5
+Sleep 1600ms
 
 # --- Quit back to the shell ---
 Type "q"
-Sleep 1200ms
-
-# --- Finale: the "all caught up" rose (offline; no account needed) ---
-Type "roses preview"
-Sleep 400ms
-Enter
-Sleep 3s
-Type "q"
-Sleep 1200ms
