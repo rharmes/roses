@@ -2,6 +2,20 @@
 
 A TUI RSS reader, backed by Feedbin.
 
+## Demo
+
+![roses demo](demo/roses.gif)
+
+The GIF is recorded with [vhs](https://github.com/charmbracelet/vhs) from
+[`demo/roses.tape`](demo/roses.tape). To (re)generate it, make sure `roses` is on
+your `PATH` and you've signed in to Feedbin once (run `roses` and log in), then:
+
+```sh
+vhs demo/roses.tape    # writes demo/roses.gif
+```
+
+The script drives an already-authenticated `roses` — no credentials live in it.
+
 ## Install
 
 Pre-built static binaries for **macOS** and **Linux** (x86_64 + aarch64) are
@@ -36,5 +50,35 @@ cargo fmt        # format
 cargo clippy     # lint
 ```
 
-See [`docs/tui_research.md`](docs/tui_research.md) for the language/stack
-rationale and the build-out roadmap.
+## Config
+
+Non-secret settings live in a TOML file at `$XDG_CONFIG_HOME/roses/config.toml`
+(or `~/.config/roses/config.toml`). Your Feedbin **password is never written
+there** — it's kept in the OS keychain. `roses` writes `email` on login; the
+browser is yours to set:
+
+```toml
+email = "you@example.com"
+
+# Command that `o` runs to open an article's URL. `%s` (or `{url}`) is replaced
+# with the URL; otherwise the URL is appended. Omit `browser` to fall back to
+# $BROWSER or the system opener (`open` on macOS, `xdg-open` elsewhere).
+browser = "w3m %s"
+
+# true for a terminal browser like w3m: roses suspends the TUI, runs it, then
+# restores. false (the default) launches a GUI browser in the background.
+browser_terminal = true
+```
+
+## Keyboard shortcuts
+
+| Key(s) | Action |
+| --- | --- |
+| `↑`/`k`, `↓`/`j` | Move within the focused column (in the reader, scroll) |
+| `←`/`h`, `→`/`l` | Move focus across columns (sources → articles → reader) |
+| `g`/`Home`, `G`/`End` | First / last item (or top / bottom of the reader) |
+| `PgUp`/`PgDn` | Page the reader |
+| `m` / `u` | Mark the selected article read / undo the last mark |
+| `o` | Open the selected article in the browser |
+| `r` | Reload |
+| `q`/`Esc` | Quit |
