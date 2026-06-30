@@ -273,7 +273,11 @@ redraw.
 
 ## Build-out status
 
-PoC + core features (TASK-1–9, 11) are done and merged or in flight; remaining backlog: **TASK-12**
-(pane padding), **TASK-13** (wrap article titles + spacing), **TASK-14** (whimsy / theming), then
-**TASK-10** (distribution: static musl binary + Homebrew). See `backlog/` (managed via the `backlog`
-CLI — do not edit task markdown by hand).
+PoC + core features (TASK-1–9, 11) plus the UI polish (TASK-12 padding, TASK-13 title wrap, TASK-14
+whimsy/rose, TASK-15 reader scrollbar) are done and merged. **TASK-10** (distribution) wires up
+tag-triggered releases — static musl Linux + macOS binaries, a Homebrew tap, and crates.io — via
+[cargo-dist] (`dist-workspace.toml` → `.github/workflows/release.yml`) plus a `publish-crates.yml`
+workflow; see [`release.md`](release.md). See `backlog/` (managed via the `backlog` CLI — do not edit
+task markdown by hand).
+
+[cargo-dist]: https://github.com/axodotdev/cargo-dist

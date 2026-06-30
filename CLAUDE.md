@@ -32,6 +32,14 @@ CI mirrors these: every push and PR must pass `cargo fmt --all --check`,
 `cargo clippy --all-targets -- -D warnings`, and `cargo test --locked`. Run
 those three before pushing — see `docs/ci.md` for the pipeline walkthrough.
 
+**Releases** are automated from a git tag (`vX.Y.Z`): [cargo-dist] builds the static
+musl Linux + macOS binaries and the Homebrew formula, and a separate workflow
+publishes to crates.io. The release config lives in `dist-workspace.toml` (never
+hand-edit `.github/workflows/release.yml` — regenerate with `dist generate`). Full
+process + one-time secret setup: `docs/release.md`.
+
+[cargo-dist]: https://github.com/axodotdev/cargo-dist
+
 Source layout under `src/`: `main` (CLI dispatch), `config` (settings +
 keychain credentials), `feedbin` (Feedbin API client), `ui` (plain-stdout
 list — `roses list`), `tui` (full-screen ratatui app — the default `roses`),
