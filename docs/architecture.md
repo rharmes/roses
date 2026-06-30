@@ -151,7 +151,7 @@ bold/dim/reversed modifiers still carry focus/selection).
 
 When nothing is unread (`Status::Ready` + empty `entries`), `draw()` short-circuits to `draw_caught_up()`
 instead of the three columns: a vertically-centered ASCII rose with petals graded light→deep rose
-(`theme::lerp`) over a green stem, and an *All caught up.* caption in the default text color. The footer
+(`theme::lerp`) over a green stem, and an *All caught up* caption in the default text color. The footer
 is always drawn. The art
 rows are equal width so `Alignment::Center` keeps the bloom aligned while centering it; if the area is
 too small for the art it degrades to just the centered caption. Loading and `Failed` states are unchanged
@@ -187,7 +187,7 @@ A fresh `Msg::Loaded` clears the undo stack.
 
 `reader_text(entry, feed, images)` builds the reader `Text`: a title/feed/url header, then the body from
 `content_blocks(html)` → `Vec<Segment>` (`Text` runs and `Image` URLs in document order). Each segment
-renders as: text lines, or cached half-block art / `[image loading…]` / `[image unavailable]`.
+renders as: text lines, or cached half-block art / `[image loading… <url>]` / `[image unavailable: <url>]`.
 
 The HTML→text helpers (shared by text segments): `tag_name`/`is_block_tag` (block tags → line breaks),
 `decode_entities`/`decode_entity` (named + numeric refs), `sanitize` (**strips control characters** so a

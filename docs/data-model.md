@@ -21,7 +21,7 @@ real-world data.
 | `content` | `Option<String>` | Full body **as HTML**; the reader renders it to text + half-block images. |
 
 `Deserialize` ignores unknown JSON fields. Derived `Clone` (entries are cloned into background tasks and
-the undo stack). `#[allow(dead_code)]` on `id` (it's read by the read/undo sync but not every code path).
+the undo stack). `#[allow(dead_code)]` on the struct (`id` is read by the read/undo sync but not every code path).
 
 ### `feedbin::Subscription` (private)
 
