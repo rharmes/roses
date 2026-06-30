@@ -201,9 +201,11 @@ from `block.inner(area)`, so the clamp stays correct under the pane padding.
 
 A **scrollbar** (TASK-15) rides the reader's right border, shown only when the reader is the *focused*
 pane **and** the wrapped content overflows the viewport (`wrapped > inner_height`). It reuses those same
-values: a `ScrollbarState::new(wrapped).viewport_content_length(inner_height).position(reader_scroll)`
+values: `ScrollbarState::new(max_scroll + 1).viewport_content_length(inner_height).position(reader_scroll)`
 rendered via `Scrollbar(VerticalRight)` into `area.inner(Margin{vertical:1,…})` (so it sits between the
-corners). ratatui maps `position = content_length − viewport` to a bottom thumb, matching `max_scroll`.
+corners). The `content_length` is the count of scroll **positions** (`max_scroll + 1`), not the line
+count — ratatui's thumb only reaches the bottom of the track when `position == content_length − 1`, so
+passing `wrapped` left it stopping partway down (fixed; regression-tested).
 
 ### Image pre-fetch (TASK-8)
 

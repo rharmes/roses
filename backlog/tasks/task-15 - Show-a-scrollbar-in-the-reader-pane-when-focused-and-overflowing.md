@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@ross'
 created_date: '2026-06-29 23:31'
-updated_date: '2026-06-29 23:36'
+updated_date: '2026-06-30 00:03'
 labels:
   - rust
   - ui
@@ -43,4 +43,6 @@ Tests: TestBackend — scrollbar cells present on right edge when reader focused
 
 <!-- SECTION:NOTES:BEGIN -->
 Implemented in draw_reader: after rendering the reader Paragraph+block, if focus==Reader && wrapped > inner_height, render Scrollbar(VerticalRight) into area.inner(Margin{vertical:1}) so the track rides the right border between the corners. State = ScrollbarState::new(wrapped).viewport_content_length(inner_height).position(reader_scroll) — reuses the existing scroll-clamp values; ratatui maps position=content_length-viewport to a bottom thumb (== max_scroll). Thumb █ over a │ track (matches the border); no begin/end arrows. Scrollbar is on the border, not over the padded text, so nothing is clipped (AC#4). Hidden when content fits or the reader isn't focused (the reader still shows the article under Articles focus, just no bar). 3 new tests (shows-when-focused+overflow; hidden-when-fits; hidden-when-unfocused) via TestBackend, scanning the right-edge column for the █ thumb. fmt+clippy clean, 64 tests, stable 10/10. docs/architecture.md updated.
+
+Rebased onto main after TASK-14 merged (resolved the shared use ratatui::layout import line + the test-module-tail splice; 69 tests green pre-fix). Bug fix (user report: thumb stopped ~halfway at max scroll): ScrollbarState content_length must be the count of scroll POSITIONS (max_scroll+1), not the total line count — ratatui's thumb only reaches the track bottom when position==content_length-1 (its max_viewport_position = content_length-1 + viewport). Changed new(wrapped) → new(max_scroll+1); thumb now reaches the bottom row at full scroll (verified by dump: thumb at top row when scroll=0, last track row at max). Added regression test reader_scrollbar_thumb_reaches_the_bottom_when_fully_scrolled. 70 tests, fmt+clippy clean, stable 10/10. docs/architecture.md scrollbar note corrected.
 <!-- SECTION:NOTES:END -->

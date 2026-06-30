@@ -725,11 +725,14 @@ impl App {
 
         // Scrollbar on the reader's right edge, shown only while the reader is the
         // active pane and its wrapped content overflows the viewport (TASK-15). The
-        // track rides the right border between the corners (vertical inset of 1);
-        // ratatui maps position = content_length − viewport to a thumb at the
-        // bottom, which is exactly `max_scroll`.
+        // track rides the right border between the corners (vertical inset of 1).
         if focused && wrapped > inner_height {
-            let mut scrollbar_state = ScrollbarState::new(wrapped as usize)
+            // `content_length` is the count of scroll *positions* (0..=max_scroll),
+            // not the total line count: ratatui's thumb only reaches the bottom of
+            // the track when `position == content_length − 1`, so pass
+            // `max_scroll + 1`. The viewport length sizes the thumb to the visible
+            // fraction.
+            let mut scrollbar_state = ScrollbarState::new(max_scroll as usize + 1)
                 .viewport_content_length(inner_height as usize)
                 .position(self.reader_scroll as usize);
             let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
@@ -2228,6 +2231,25 @@ mod tests {
         assert!(
             !reader_has_scrollbar(&mut app),
             "no scrollbar unless the reader is the focused pane"
+        );
+    }
+
+    #[test]
+    fn reader_scrollbar_thumb_reaches_the_bottom_when_fully_scrolled() {
+        let long = format!("<p>{}</p>", "word ".repeat(300));
+        let mut app = app_with_long_article(&long, 2); // Reader focused
+        app.reader_scroll = u16::MAX; // draw() clamps to max_scroll → fully scrolled
+        let backend = ratatui::backend::TestBackend::new(120, 20);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        // The reader area is 19 rows tall, so the scrollbar track (vertical inset 1)
+        // spans rows 1..=17. Fully scrolled, the thumb must reach the last track row
+        // (17) — the bug was it stopped partway down.
+        assert_eq!(
+            buffer.cell((119, 17)).unwrap().symbol(),
+            "█",
+            "thumb reaches the bottom of the track at max scroll"
         );
     }
 }
