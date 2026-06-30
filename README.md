@@ -1,20 +1,8 @@
 # roses
 
-A TUI RSS reader, backed by Feedbin.
-
-## Demo
+A TUI RSS reader, backed by Feedbin. 100% Rust and lightning fast. Opens feed items in your browser of choice (graphical or CLI).
 
 ![roses demo](demo/roses.gif)
-
-The GIF is recorded with [vhs](https://github.com/charmbracelet/vhs) from
-[`demo/roses.tape`](demo/roses.tape). To (re)generate it, make sure `roses` is on
-your `PATH` and you've signed in to Feedbin once (run `roses` and log in), then:
-
-```sh
-vhs demo/roses.tape    # writes demo/roses.gif
-```
-
-The script drives an already-authenticated `roses` — no credentials live in it.
 
 ## Install
 
