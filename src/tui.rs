@@ -12,10 +12,13 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
-use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Flex, Layout, Margin, Rect};
 use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, List, ListItem, ListState, Padding, Paragraph, Wrap};
+use ratatui::widgets::{
+    Block, List, ListItem, ListState, Padding, Paragraph, Scrollbar, ScrollbarOrientation,
+    ScrollbarState, Wrap,
+};
 use ratatui::{DefaultTerminal, Frame};
 use tokio::runtime::Handle;
 use tokio::sync::mpsc::{self, UnboundedSender};
@@ -30,6 +33,9 @@ use crate::theme;
 const DISPLAY_LIMIT: usize = 50;
 /// Lines the reader scrolls per PageUp/PageDown.
 const READER_PAGE: u16 = 10;
+/// Lines the reader scrolls per ↑/↓ (a few at a time, so holding the key moves at
+/// a useful pace rather than one line per key-repeat).
+const READER_SCROLL_STEP: u16 = 3;
 /// How long to wait for input before redrawing (also bounds how quickly a
 /// finished background task shows up).
 const TICK: Duration = Duration::from_millis(100);
@@ -363,9 +369,9 @@ impl App {
             Focus::Articles => self.move_article(delta),
             Focus::Reader => {
                 self.reader_scroll = if delta > 0 {
-                    self.reader_scroll.saturating_add(1)
+                    self.reader_scroll.saturating_add(READER_SCROLL_STEP)
                 } else {
-                    self.reader_scroll.saturating_sub(1)
+                    self.reader_scroll.saturating_sub(READER_SCROLL_STEP)
                 };
             }
         }
@@ -719,6 +725,33 @@ impl App {
             .wrap(Wrap { trim: false })
             .scroll((self.reader_scroll, 0));
         frame.render_widget(reader, area);
+
+        // Scrollbar on the reader's right edge, shown only while the reader is the
+        // active pane and its wrapped content overflows the viewport (TASK-15). The
+        // track rides the right border between the corners (vertical inset of 1).
+        if focused && wrapped > inner_height {
+            // `content_length` is the count of scroll *positions* (0..=max_scroll),
+            // not the total line count: ratatui's thumb only reaches the bottom of
+            // the track when `position == content_length − 1`, so pass
+            // `max_scroll + 1`. The viewport length sizes the thumb to the visible
+            // fraction.
+            let mut scrollbar_state = ScrollbarState::new(max_scroll as usize + 1)
+                .viewport_content_length(inner_height as usize)
+                .position(self.reader_scroll as usize);
+            let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None)
+                .end_symbol(None)
+                .track_symbol(Some("│"))
+                .thumb_symbol("█");
+            frame.render_stateful_widget(
+                scrollbar,
+                area.inner(Margin {
+                    vertical: 1,
+                    horizontal: 0,
+                }),
+                &mut scrollbar_state,
+            );
+        }
     }
 }
 
@@ -1481,7 +1514,7 @@ mod tests {
         app.focus_right(); // Reader
         assert_eq!(app.reader_scroll, 0);
         app.move_cursor(1);
-        assert_eq!(app.reader_scroll, 1);
+        assert_eq!(app.reader_scroll, READER_SCROLL_STEP);
         app.move_cursor(-1);
         assert_eq!(app.reader_scroll, 0);
     }
@@ -1822,10 +1855,10 @@ mod tests {
 
         let backend = ratatui::backend::TestBackend::new(40, 8);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        app.move_cursor(1); // scroll down one line
+        app.move_cursor(1); // scroll down one step
         terminal.draw(|frame| app.draw(frame)).unwrap();
         assert_eq!(
-            app.reader_scroll, 1,
+            app.reader_scroll, READER_SCROLL_STEP,
             "overflowing wrapped content must scroll, not clamp to 0"
         );
     }
@@ -2132,6 +2165,94 @@ mod tests {
         assert!(
             rendered.contains("All"),
             "tiny terminal still shows the caption"
+        );
+    }
+
+    /// One article whose body overflows the reader; `extra` focus_right() steps move
+    /// the cursor (1 → Articles, 2 → Reader).
+    fn app_with_long_article(content: &str, focus_steps: usize) -> App {
+        let mut feed_titles = HashMap::new();
+        feed_titles.insert(9, "Feed".to_string());
+        let entry = Entry {
+            id: 1,
+            feed_id: 9,
+            title: Some("T".to_string()),
+            url: None,
+            published: None,
+            summary: None,
+            content: Some(content.to_string()),
+        };
+        let mut app = App::new();
+        app.apply(Msg::Loaded(Ok(Loaded {
+            entries: vec![entry],
+            feed_titles,
+            total_unread: 1,
+        })));
+        for _ in 0..focus_steps {
+            app.focus_right();
+        }
+        app
+    }
+
+    /// Is the reader's right-edge column (col 119 at width 120) showing a scrollbar
+    /// thumb? The thumb glyph (█) is distinct from the border/track (│).
+    fn reader_has_scrollbar(app: &mut App) -> bool {
+        let backend = ratatui::backend::TestBackend::new(120, 20);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..20u16).any(|y| buffer.cell((119, y)).unwrap().symbol() == "█")
+    }
+
+    #[test]
+    fn reader_scrollbar_shows_when_focused_and_overflowing() {
+        let long = format!("<p>{}</p>", "word ".repeat(300));
+        let mut app = app_with_long_article(&long, 2); // focus Reader
+        assert!(matches!(app.focus, Focus::Reader));
+        assert!(
+            reader_has_scrollbar(&mut app),
+            "a scrollbar thumb rides the reader's right edge when content overflows"
+        );
+    }
+
+    #[test]
+    fn reader_scrollbar_hidden_when_content_fits() {
+        let mut app = app_with_long_article("<p>Short.</p>", 2); // focus Reader
+        assert!(matches!(app.focus, Focus::Reader));
+        assert!(
+            !reader_has_scrollbar(&mut app),
+            "no scrollbar when the content fits the viewport"
+        );
+    }
+
+    #[test]
+    fn reader_scrollbar_hidden_when_reader_unfocused() {
+        let long = format!("<p>{}</p>", "word ".repeat(300));
+        // Focus Articles: the reader shows the (overflowing) article but isn't active.
+        let mut app = app_with_long_article(&long, 1);
+        assert!(matches!(app.focus, Focus::Articles));
+        assert!(
+            !reader_has_scrollbar(&mut app),
+            "no scrollbar unless the reader is the focused pane"
+        );
+    }
+
+    #[test]
+    fn reader_scrollbar_thumb_reaches_the_bottom_when_fully_scrolled() {
+        let long = format!("<p>{}</p>", "word ".repeat(300));
+        let mut app = app_with_long_article(&long, 2); // Reader focused
+        app.reader_scroll = u16::MAX; // draw() clamps to max_scroll → fully scrolled
+        let backend = ratatui::backend::TestBackend::new(120, 20);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        // The reader area is 19 rows tall, so the scrollbar track (vertical inset 1)
+        // spans rows 1..=17. Fully scrolled, the thumb must reach the last track row
+        // (17) — the bug was it stopped partway down.
+        assert_eq!(
+            buffer.cell((119, 17)).unwrap().symbol(),
+            "█",
+            "thumb reaches the bottom of the track at max scroll"
         );
     }
 }

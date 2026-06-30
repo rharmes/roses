@@ -161,7 +161,7 @@ too small for the art it degrades to just the centered caption. Loading and `Fai
 
 | Key(s) | Action |
 | --- | --- |
-| `↑`/`k`, `↓`/`j` | Move the cursor within the focused column (in Reader, scroll one line). |
+| `↑`/`k`, `↓`/`j` | Move the cursor within the focused column (in Reader, scroll a few lines — `READER_SCROLL_STEP`). |
 | `←`/`h`, `→`/`l` | Move focus across columns (preserving each column's cursor). |
 | `g`/`Home`, `G`/`End` | First / last in the focused column (or top/bottom of the reader). |
 | `PgUp`/`PgDn` | Page the reader (only when the reader is focused). |
@@ -198,6 +198,14 @@ Reader scroll is clamped to the **wrapped** height via `Paragraph::line_count(in
 ratatui's `unstable-rendered-line-info` feature) — clamping to the raw line count pinned long
 word-wrapped paragraphs at the top (a fixed bug; regression-tested). `inner_width`/`inner_height` come
 from `block.inner(area)`, so the clamp stays correct under the pane padding.
+
+A **scrollbar** (TASK-15) rides the reader's right border, shown only when the reader is the *focused*
+pane **and** the wrapped content overflows the viewport (`wrapped > inner_height`). It reuses those same
+values: `ScrollbarState::new(max_scroll + 1).viewport_content_length(inner_height).position(reader_scroll)`
+rendered via `Scrollbar(VerticalRight)` into `area.inner(Margin{vertical:1,…})` (so it sits between the
+corners). The `content_length` is the count of scroll **positions** (`max_scroll + 1`), not the line
+count — ratatui's thumb only reaches the bottom of the track when `position == content_length − 1`, so
+passing `wrapped` left it stopping partway down (fixed; regression-tested).
 
 ### Image pre-fetch (TASK-8)
 
