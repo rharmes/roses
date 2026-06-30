@@ -11,6 +11,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use chrono::{DateTime, Local};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::layout::{Alignment, Constraint, Flex, Layout, Margin, Rect};
 use ratatui::style::{Style, Stylize};
@@ -703,7 +704,7 @@ impl App {
             return;
         };
 
-        let text = reader_text(entry, self.feed_name(entry.feed_id), &self.images);
+        let text = reader_text(entry, &self.images);
         // The true content rect — inside the border *and* the padding (TASK-12) —
         // sets the wrap width and visible height used to clamp the scroll offset.
         let inner = block.inner(area);
@@ -888,7 +889,37 @@ fn wrap_title(text: &str, width: u16) -> Vec<String> {
 /// Build the reader pane's content for one entry: a title/feed/url header, then
 /// the body — text rendered from HTML, with images shown as half-block art (a
 /// placeholder while loading, a notice when unavailable).
-fn reader_text(entry: &Entry, feed: &str, images: &HashMap<String, ImageState>) -> Text<'static> {
+/// chrono layout for the reader's published date, e.g.
+/// "Sunday, June 15, 2026 at 6:00 AM". `%-d`/`%-I` drop the leading zero —
+/// chrono honors the `-` no-pad flag on every platform (unlike libc strftime).
+const PUBLISHED_FORMAT: &str = "%A, %B %-d, %Y at %-I:%M %p";
+
+/// Parse a Feedbin RFC 3339 timestamp (e.g. "2023-12-02T02:30:21.000000Z") and
+/// render it in the host's local timezone. Returns `None` for a missing or
+/// unparseable value so the caller can simply omit the line (TASK-17 AC #3).
+fn format_published(raw: &str) -> Option<String> {
+    format_published_in(raw, &Local)
+}
+
+/// The timezone-agnostic core of [`format_published`], split out so it can be
+/// unit-tested against a fixed offset: `Local` reads the host timezone, which
+/// would make the test machine-dependent (and we have zero tolerance for flaky
+/// tests). Production passes `&Local`; tests pass `&Utc` / a `FixedOffset`.
+fn format_published_in<Tz>(raw: &str, tz: &Tz) -> Option<String>
+where
+    Tz: chrono::TimeZone,
+    Tz::Offset: std::fmt::Display,
+{
+    let parsed = DateTime::parse_from_rfc3339(raw).ok()?;
+    Some(
+        parsed
+            .with_timezone(tz)
+            .format(PUBLISHED_FORMAT)
+            .to_string(),
+    )
+}
+
+fn reader_text(entry: &Entry, images: &HashMap<String, ImageState>) -> Text<'static> {
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(
         entry
@@ -898,11 +929,26 @@ fn reader_text(entry: &Entry, feed: &str, images: &HashMap<String, ImageState>) 
             .bold()
             .fg(theme::ROSE),
     ));
-    let meta = match &entry.published {
-        Some(published) => format!("{feed} · {published}"),
-        None => feed.to_string(),
-    };
-    lines.push(Line::from(meta.dim()));
+    // Meta line: author (if any) · formatted date (if any). The feed/blog name
+    // is intentionally omitted — it's already the highlighted source on the
+    // left, so we show the author instead when Feedbin gives us one (TASK-18),
+    // and the human-readable published date in place of the raw ISO string
+    // (TASK-17). When we have neither, the line is dropped entirely.
+    let mut meta_parts: Vec<String> = Vec::new();
+    if let Some(author) = entry
+        .author
+        .as_deref()
+        .map(str::trim)
+        .filter(|a| !a.is_empty())
+    {
+        meta_parts.push(author.to_string());
+    }
+    if let Some(date) = entry.published.as_deref().and_then(format_published) {
+        meta_parts.push(date);
+    }
+    if !meta_parts.is_empty() {
+        lines.push(Line::from(meta_parts.join(" · ").dim()));
+    }
     if let Some(url) = &entry.url {
         lines.push(Line::from(url.clone().underlined()));
     }
@@ -1372,6 +1418,7 @@ mod tests {
             feed_id,
             title: Some(title.to_string()),
             url: Some(format!("https://example.com/{id}")),
+            author: None,
             published: Some("2026-06-29T00:00:00.000000Z".to_string()),
             summary: Some("summary".to_string()),
             content: content.map(str::to_string),
@@ -1422,6 +1469,7 @@ mod tests {
             feed_id: 9,
             title: Some(format!("a{id}")),
             url: None,
+            author: None,
             published: Some(published.to_string()),
             summary: None,
             content: None,
@@ -1668,12 +1716,13 @@ mod tests {
             feed_id: 9,
             title: Some("T".to_string()),
             url: None,
+            author: None,
             published: None,
             summary: None,
             content: Some("<img src=\"https://x/i.png\">".to_string()),
         };
         let collect = |images: &HashMap<String, ImageState>| -> String {
-            reader_text(&entry, "Feed", images)
+            reader_text(&entry, images)
                 .lines
                 .iter()
                 .flat_map(|line| line.spans.iter().map(|span| span.content.to_string()))
@@ -1691,12 +1740,108 @@ mod tests {
         );
     }
 
+    /// Flatten a rendered reader `Text` into one newline-joined string.
+    fn render_reader(entry: &Entry) -> String {
+        reader_text(entry, &HashMap::new())
+            .lines
+            .iter()
+            .flat_map(|line| line.spans.iter().map(|span| span.content.to_string()))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn header_entry(author: Option<&str>, published: Option<&str>) -> Entry {
+        Entry {
+            id: 1,
+            feed_id: 9,
+            title: Some("Headline".to_string()),
+            url: None,
+            author: author.map(str::to_string),
+            published: published.map(str::to_string),
+            summary: None,
+            content: None,
+        }
+    }
+
+    #[test]
+    fn published_date_formats_in_the_target_timezone() {
+        use chrono::{FixedOffset, Utc};
+        // In UTC this instant is Saturday, December 2, 2023 at 2:30 AM.
+        assert_eq!(
+            format_published_in("2023-12-02T02:30:21.000000Z", &Utc).as_deref(),
+            Some("Saturday, December 2, 2023 at 2:30 AM"),
+        );
+        // West of UTC (-08:00) rolls back to the previous evening — exercises the
+        // timezone conversion, the PM half, and a day-boundary crossing.
+        let pst = FixedOffset::west_opt(8 * 3600).unwrap();
+        assert_eq!(
+            format_published_in("2023-12-02T02:30:21.000000Z", &pst).as_deref(),
+            Some("Friday, December 1, 2023 at 6:30 PM"),
+        );
+        // Missing / unparseable input degrades to None so the caller drops the
+        // line rather than showing a raw or garbage value (TASK-17 AC #3).
+        assert_eq!(format_published_in("", &Utc), None);
+        assert_eq!(format_published_in("not-a-date", &Utc), None);
+    }
+
+    #[test]
+    fn reader_header_shows_author_and_humanized_date_not_the_feed_name() {
+        // TASK-18: the feed/blog name is the highlighted source on the left, so
+        // it must not repeat in the reader header — the author shows instead.
+        // TASK-17: the published date is humanized, not the raw ISO-8601 string.
+        let rendered = render_reader(&header_entry(
+            Some("Ada Lovelace"),
+            Some("2023-12-02T02:30:21.000000Z"),
+        ));
+        assert!(
+            rendered.contains("Ada Lovelace · "),
+            "author then a separator: {rendered:?}"
+        );
+        // Month + year are stable in any host timezone (±14h can't move
+        // 2023-12-02 02:30 UTC out of December 2023), so this stays deterministic.
+        assert!(rendered.contains("December"), "month name: {rendered:?}");
+        assert!(rendered.contains("2023"), "year: {rendered:?}");
+        assert!(rendered.contains(" at "), "human time: {rendered:?}");
+        assert!(
+            !rendered.contains("2023-12-02T02:30:21"),
+            "raw ISO timestamp must be reformatted: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn reader_header_without_author_shows_only_the_date() {
+        // No author: the date stands alone, with no leading separator and no
+        // feed name in its place.
+        let rendered = render_reader(&header_entry(None, Some("2023-12-02T02:30:21.000000Z")));
+        assert!(rendered.contains("December"), "date shown: {rendered:?}");
+        assert!(
+            !rendered.contains(" · "),
+            "no separator when author is absent: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn reader_header_drops_the_meta_line_when_nothing_to_show() {
+        // Unparseable date + no author → the meta line is omitted entirely, and
+        // the raw value never leaks through.
+        let rendered = render_reader(&header_entry(None, Some("not-a-date")));
+        assert!(
+            !rendered.contains("not-a-date"),
+            "raw value hidden: {rendered:?}"
+        );
+        assert!(!rendered.contains(" · "), "no meta separator: {rendered:?}");
+        // Wholly absent published + author is likewise clean.
+        let none = render_reader(&header_entry(None, None));
+        assert!(!none.contains(" · "), "no meta separator: {none:?}");
+    }
+
     fn img_entry(id: i64, feed_id: i64, img_url: &str) -> Entry {
         Entry {
             id,
             feed_id,
             title: Some(format!("t{id}")),
             url: None,
+            author: None,
             published: None,
             summary: None,
             content: Some(format!("<p>body</p><img src=\"{img_url}\">")),
@@ -1712,6 +1857,7 @@ mod tests {
             feed_id: 7,
             title: Some("t3".to_string()),
             url: None,
+            author: None,
             published: None,
             summary: None,
             content: Some("<p>no image</p>".to_string()),
@@ -1765,6 +1911,7 @@ mod tests {
             feed_id: feed,
             title: Some(format!("t{id}")),
             url: None,
+            author: None,
             published: Some(published.to_string()),
             summary: None,
             content: Some(format!("<img src=\"{url}\">")),
@@ -1840,6 +1987,7 @@ mod tests {
             feed_id: 9,
             title: Some("T".to_string()),
             url: None,
+            author: None,
             published: None,
             summary: None,
             content: Some(format!("<p>{long}</p>")),
@@ -1963,6 +2111,7 @@ mod tests {
             feed_id: 9,
             title: Some(title.to_string()),
             url: None,
+            author: None,
             published: Some(published.to_string()),
             summary: None,
             content: None,
@@ -2178,6 +2327,7 @@ mod tests {
             feed_id: 9,
             title: Some("T".to_string()),
             url: None,
+            author: None,
             published: None,
             summary: None,
             content: Some(content.to_string()),

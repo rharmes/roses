@@ -65,6 +65,7 @@ mod tests {
             feed_id,
             title: title.map(str::to_string),
             url: url.map(str::to_string),
+            author: None,
             published: None,
             summary: None,
             content: None,

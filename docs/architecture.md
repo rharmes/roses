@@ -185,9 +185,18 @@ A fresh `Msg::Loaded` clears the undo stack.
 
 ### Reader content pipeline
 
-`reader_text(entry, feed, images)` builds the reader `Text`: a title/feed/url header, then the body from
-`content_blocks(html)` → `Vec<Segment>` (`Text` runs and `Image` URLs in document order). Each segment
-renders as: text lines, or cached half-block art / `[image loading… <url>]` / `[image unavailable: <url>]`.
+`reader_text(entry, images)` builds the reader `Text`: a header (title; then a dim meta line of
+**author · published-date**; then the url), then the body from `content_blocks(html)` → `Vec<Segment>`
+(`Text` runs and `Image` URLs in document order). Each segment renders as: text lines, or cached
+half-block art / `[image loading… <url>]` / `[image unavailable: <url>]`.
+
+The meta line **omits the feed/blog name** — it's already the highlighted source in the left column, so
+the header shows the entry's `author` instead when Feedbin provides one (TASK-18). The raw ISO-8601
+`published` value is humanized by `format_published()` to e.g. `Sunday, June 15, 2026 at 6:00 AM`
+(`chrono`, host-local timezone; TASK-17); a missing or unparseable date is dropped, and if neither
+author nor date is present the meta line is omitted entirely. `format_published_in(raw, tz)` is the
+timezone-agnostic core, split out so tests pin a fixed offset rather than depend on the host clock.
+(Sorting still uses the raw `published` string compare — see `load()`.)
 
 The HTML→text helpers (shared by text segments): `tag_name`/`is_block_tag` (block tags → line breaks),
 `decode_entities`/`decode_entity` (named + numeric refs), `sanitize` (**strips control characters** so a
@@ -263,6 +272,7 @@ redraw.
 | `rpassword` | Hidden password prompt on first run. |
 | `dirs` | Home directory for the XDG fallback. |
 | `image` (`png, jpeg, gif, webp`) | Decode entry images for half-block rendering. |
+| `chrono` (`clock`, no default features) | Parse the RFC 3339 `published` date + format it in local time for the reader header. |
 | `shlex` | Quote-safe splitting of the browser command template. |
 | `unicode-width` | Display-width-correct wrapping of article titles (`wrap_title`). |
 | `anyhow` | Error context throughout. |
