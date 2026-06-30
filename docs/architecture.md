@@ -185,10 +185,17 @@ A fresh `Msg::Loaded` clears the undo stack.
 
 ### Reader content pipeline
 
-`reader_text(entry, images)` builds the reader `Text`: a header (title; then a dim meta line of
-**author · published-date**; then the url), then the body from `content_blocks(html)` → `Vec<Segment>`
+`reader_text(entry, images, max_width)` builds the reader `Text`: a header (title; then a dim meta line
+of **author · published-date**; then the url), then the body from `content_blocks(html)` → `Vec<Segment>`
 (`Text` runs and `Image` URLs in document order). Each segment renders as: text lines, or cached
 half-block art / `[image loading… <url>]` / `[image unavailable: <url>]`.
+
+Half-block art is rendered once at the reader width **when it was fetched** and cached by URL. If the
+terminal later narrows, that stale art would be wider than the reader's `Wrap` width and wrap into a full
+row + a short fragment — the "half-height rows" artifact. So `reader_text` **clips each art line to
+`max_width`** (the reader's current inner width, passed from `draw_reader`) via `clip_line_to_width`: a
+no-op when the art already fits, a graceful right-crop when it doesn't (until a reload re-renders it at
+the new width). Text lines are *not* clipped — they still wrap.
 
 The meta line **omits the feed/blog name** — it's already the highlighted source in the left column, so
 the header shows the entry's `author` instead when Feedbin provides one (TASK-18). The raw ISO-8601

@@ -704,12 +704,16 @@ impl App {
             return;
         };
 
-        let text = reader_text(entry, &self.images);
         // The true content rect — inside the border *and* the padding (TASK-12) —
         // sets the wrap width and visible height used to clamp the scroll offset.
         let inner = block.inner(area);
         let inner_width = inner.width;
         let inner_height = inner.height;
+
+        // Pass the inner width so image art is clipped to the current content
+        // width — stale-width art (after a resize) then can't wrap into the
+        // half-height fragment rows it otherwise would.
+        let text = reader_text(entry, &self.images, inner_width);
 
         // Clamp scroll to the *wrapped* height (not the raw line count): one long
         // paragraph is a single line that word-wraps to many rows, so clamping on
@@ -886,9 +890,6 @@ fn wrap_title(text: &str, width: u16) -> Vec<String> {
     lines
 }
 
-/// Build the reader pane's content for one entry: a title/feed/url header, then
-/// the body — text rendered from HTML, with images shown as half-block art (a
-/// placeholder while loading, a notice when unavailable).
 /// chrono layout for the reader's published date, e.g.
 /// "Sunday, June 15, 2026 at 6:00 AM". `%-d`/`%-I` drop the leading zero —
 /// chrono honors the `-` no-pad flag on every platform (unlike libc strftime).
@@ -919,7 +920,54 @@ where
     )
 }
 
-fn reader_text(entry: &Entry, images: &HashMap<String, ImageState>) -> Text<'static> {
+/// Truncate a line to at most `max_width` display columns. Used to clamp cached
+/// image art to the reader's *current* inner width: art is rendered once at the
+/// width it was fetched at, so if the terminal later narrows, an over-wide art
+/// line would wrap into a full row + a short fragment (the "half-height rows"
+/// artifact). Clipping keeps each art line within the wrap width so it never
+/// wraps — a no-op when the art already fits, a graceful right-crop when it
+/// doesn't (until a reload re-renders it at the new width).
+fn clip_line_to_width(line: &Line<'static>, max_width: u16) -> Line<'static> {
+    let max = max_width as usize;
+    let mut used = 0usize;
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    for span in &line.spans {
+        let span_width = span.content.width();
+        if used + span_width <= max {
+            spans.push(span.clone());
+            used += span_width;
+        } else {
+            // This span crosses the limit: keep whole chars up to the remainder.
+            let remaining = max - used;
+            let mut clipped = String::new();
+            let mut w = 0usize;
+            for ch in span.content.chars() {
+                let cw = ch.width().unwrap_or(0);
+                if w + cw > remaining {
+                    break;
+                }
+                clipped.push(ch);
+                w += cw;
+            }
+            if !clipped.is_empty() {
+                spans.push(Span::styled(clipped, span.style));
+            }
+            break;
+        }
+    }
+    Line::from(spans)
+}
+
+/// Build the reader pane's content for one entry: a title / author·date / url
+/// header, then the body — text rendered from HTML, with images shown as
+/// half-block art (a placeholder while loading, a notice when unavailable).
+/// `max_width` is the reader's current inner width; image art is clipped to it
+/// so stale-width art (after a resize) can't wrap into fragment rows.
+fn reader_text(
+    entry: &Entry,
+    images: &HashMap<String, ImageState>,
+    max_width: u16,
+) -> Text<'static> {
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(
         entry
@@ -969,7 +1017,7 @@ fn reader_text(entry: &Entry, images: &HashMap<String, ImageState>) -> Text<'sta
             Segment::Image(url) => match images.get(&url) {
                 Some(ImageState::Ready(art)) => {
                     lines.push(Line::from(""));
-                    lines.extend(art.iter().cloned());
+                    lines.extend(art.iter().map(|line| clip_line_to_width(line, max_width)));
                     lines.push(Line::from(""));
                 }
                 Some(ImageState::Failed) => {
@@ -1722,7 +1770,7 @@ mod tests {
             content: Some("<img src=\"https://x/i.png\">".to_string()),
         };
         let collect = |images: &HashMap<String, ImageState>| -> String {
-            reader_text(&entry, images)
+            reader_text(&entry, images, 80)
                 .lines
                 .iter()
                 .flat_map(|line| line.spans.iter().map(|span| span.content.to_string()))
@@ -1742,7 +1790,7 @@ mod tests {
 
     /// Flatten a rendered reader `Text` into one newline-joined string.
     fn render_reader(entry: &Entry) -> String {
-        reader_text(entry, &HashMap::new())
+        reader_text(entry, &HashMap::new(), 80)
             .lines
             .iter()
             .flat_map(|line| line.spans.iter().map(|span| span.content.to_string()))
@@ -1833,6 +1881,51 @@ mod tests {
         // Wholly absent published + author is likewise clean.
         let none = render_reader(&header_entry(None, None));
         assert!(!none.contains(" · "), "no meta separator: {none:?}");
+    }
+
+    #[test]
+    fn oversize_image_art_is_clipped_so_it_cannot_wrap() {
+        // Regression: image art is rendered at the reader width when it was
+        // fetched, then cached. If the terminal later narrows, the stale-wide art
+        // would overflow the reader's wrap width and wrap into a full row + a
+        // short fragment — the "half-height rows" artifact. reader_text clips art
+        // to max_width so no art line can exceed it (and thus can't wrap).
+        let url = "https://x/i.png";
+        let entry = Entry {
+            id: 1,
+            feed_id: 9,
+            title: Some("T".to_string()),
+            url: None,
+            author: None,
+            published: None,
+            summary: None,
+            content: Some(format!("<img src=\"{url}\">")),
+        };
+        // One art line 10 cells wide, as if rendered when the terminal was wider.
+        let wide = Line::from(Span::styled(
+            "▀".repeat(10),
+            Style::default().fg(theme::ROSE).bg(theme::LEAF),
+        ));
+        let mut images = HashMap::new();
+        images.insert(url.to_string(), ImageState::Ready(vec![wide]));
+
+        // Render into a reader only 6 columns wide.
+        let text = reader_text(&entry, &images, 6);
+        for line in &text.lines {
+            let w: usize = line.spans.iter().map(|s| s.content.width()).sum();
+            assert!(
+                w <= 6,
+                "no line may exceed the wrap width (would fragment): {w}"
+            );
+        }
+        // The art row is still present, clipped to exactly 6 blocks (not dropped).
+        let blocks: usize = text
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.matches('▀').count())
+            .sum();
+        assert_eq!(blocks, 6, "art clipped to the wrap width");
     }
 
     fn img_entry(id: i64, feed_id: i64, img_url: &str) -> Entry {
