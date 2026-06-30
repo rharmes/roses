@@ -77,3 +77,14 @@ JSON
 ```
 
 `strict: true` also requires the branch to be up to date with `main` before merging.
+
+## Release pipeline (separate from `lint-and-test`)
+
+Distribution (TASK-10) is **not** part of this `lint-and-test` workflow. Tagged
+releases are handled by two other workflows — `.github/workflows/release.yml`
+([cargo-dist], generated from `dist-workspace.toml`) and
+`.github/workflows/publish-crates.yml` — triggered by a `vX.Y.Z` tag. On pull
+requests, `release.yml` also runs a lightweight **`plan`** job that validates the
+release config without releasing. Full details: [`release.md`](release.md).
+
+[cargo-dist]: https://github.com/axodotdev/cargo-dist

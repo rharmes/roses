@@ -5,6 +5,7 @@ edition = "2024"
 description = "A TUI RSS reader, backed by Feedbin."
 license = "MIT"
 repository = "https://github.com/rharmes/roses"
+homepage = "https://github.com/rharmes/roses"
 readme = "README.md"
 
 [dependencies]
@@ -23,3 +24,8 @@ unicode-width = "0.2.2"
 
 [dev-dependencies]
 mockito = "1.7.2"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

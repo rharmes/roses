@@ -1,0 +1,35 @@
+name: Publish to crates.io
+
+# Publish the crate to crates.io on a final release tag (vX.Y.Z) so
+# `cargo install roses` works. Pre-release tags (e.g. v0.1.0-rc1) are skipped.
+# The binary archives + Homebrew formula are produced separately by release.yml
+# (cargo-dist). Requires a CARGO_REGISTRY_TOKEN repository secret.
+on:
+  push:
+    tags:
+      # vMAJOR.MINOR.PATCH with no pre-release suffix.
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+
+# Least privilege — publishing only reads the repository (the token does the rest).
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: cargo publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v7
+
+      # Match the lint-and-test job: install the pinned stable toolchain so the
+      # crate is built/verified identically to CI (see docs/ci.md).
+      - name: Install the pinned Rust toolchain (stable)
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Publish to crates.io
+        run: cargo publish --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
