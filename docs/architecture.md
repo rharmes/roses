@@ -219,6 +219,13 @@ are untouched while it's open (AC #2). It's modal — while open, `handle_key` t
 dismiss (so `?`/`Esc`/`q` all close it, and `q` closes the overlay rather than quitting) and returns
 `Action::None`.
 
+While the overlay is open the background accent **recedes to grey** so the overlay draws the eye (TASK-46):
+`App::accent()` returns `theme::MUTED` instead of `theme::ROSE` when `show_help` is set, and the focused
+column's border/title (`column_block`) and the selection bar (`highlight`) resolve their color through it.
+This is display-only — focus/selection state is unchanged — and it's scoped to those two: the overlay's own
+border/title, the footer keys, and the reader title keep their rose (the reader title lives in the memoized
+`reader_text`, so muting it would mean keying the reader cache on `show_help` — deliberately out of scope).
+
 ### Optimistic mark-read + undo (TASK-7 AC #4, TASK-30)
 
 Writes update the UI immediately and roll back on failure so client and server stay consistent. The single

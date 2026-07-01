@@ -8,6 +8,9 @@ use ratatui::style::Color;
 
 /// Primary accent — focused chrome, selection, reader title, footer keys.
 pub const ROSE: Color = Color::Rgb(0xE0, 0x6C, 0x9A);
+/// Muted neutral grey the focus/selection accent recedes to while the help
+/// overlay is open, so the overlay itself draws the eye (TASK-46).
+pub const MUTED: Color = Color::Rgb(0x80, 0x80, 0x80);
 /// Top of the petal gradient (lightest).
 pub const ROSE_LIGHT: Color = Color::Rgb(0xF2, 0xA9, 0xC4);
 /// Bottom of the petal gradient (deepest).
