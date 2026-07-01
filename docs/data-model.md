@@ -16,7 +16,8 @@ real-world data.
 | `feed_id` | `i64` | Which subscription/feed this belongs to; joined to `feed_titles`. |
 | `title` | `Option<String>` | Falls back to `(untitled)`. |
 | `url` | `Option<String>` | Article URL (opened by `o`). |
-| `published` | `Option<String>` | ISO-8601 string; used only for sorting (string compare = chronological). |
+| `author` | `Option<String>` | Author display name (nullable in Feedbin); shown in the reader header in place of the feed name (TASK-18). |
+| `published` | `Option<String>` | ISO-8601 string. Sorted on as a raw string compare (= chronological); also humanized to local time for the reader header via `format_published()` (TASK-17). |
 | `summary` | `Option<String>` | Short text; reader body fallback when `content` is absent. |
 | `content` | `Option<String>` | Full body **as HTML**; the reader renders it to text + half-block images. |
 

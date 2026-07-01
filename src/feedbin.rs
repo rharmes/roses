@@ -28,11 +28,10 @@ const MAX_UNREAD_IDS_PER_REQUEST: usize = 1000;
 
 const USER_AGENT: &str = concat!("roses/", env!("CARGO_PKG_VERSION"));
 
-/// A hydrated Feedbin entry. Feedbin sends `title`, `url`, `published`,
-/// `summary`, and `content` as nullable, so they are `Option` to avoid
-/// panicking on real-world data (AC #5). Other response fields (author,
-/// enclosure, …) are ignored. `content` is HTML; the reader pane renders it to
-/// text. Remaining fields beyond these are ignored by serde.
+/// A hydrated Feedbin entry. Feedbin sends `title`, `url`, `author`,
+/// `published`, `summary`, and `content` as nullable, so they are `Option` to
+/// avoid panicking on real-world data (AC #5). `content` is HTML; the reader
+/// pane renders it to text. Remaining fields beyond these are ignored by serde.
 #[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)] // `id` feeds the read/unread sync in TASK-7
 pub struct Entry {
@@ -40,6 +39,9 @@ pub struct Entry {
     pub feed_id: i64,
     pub title: Option<String>,
     pub url: Option<String>,
+    /// Display name of the author, when Feedbin provides one; shown in the
+    /// reader header in place of the (redundant) feed name (TASK-18).
+    pub author: Option<String>,
     pub published: Option<String>,
     /// Short plain-ish summary; falls back here when `content` is absent.
     pub summary: Option<String>,
@@ -288,8 +290,8 @@ mod tests {
     fn entries_hydrates_and_tolerates_null_fields() {
         let mut server = mockito::Server::new();
         let body = r#"[
-            {"id": 1, "feed_id": 7, "title": "Hello", "url": "https://example.com/a", "published": "2026-06-29T00:00:00.000000Z", "content": "<p>ignored</p>"},
-            {"id": 2, "feed_id": 7, "title": null, "url": null, "published": null}
+            {"id": 1, "feed_id": 7, "title": "Hello", "url": "https://example.com/a", "author": "Ada Lovelace", "published": "2026-06-29T00:00:00.000000Z", "content": "<p>ignored</p>"},
+            {"id": 2, "feed_id": 7, "title": null, "url": null, "author": null, "published": null}
         ]"#;
         server
             .mock("GET", "/v2/entries.json")
@@ -303,8 +305,10 @@ mod tests {
         assert_eq!(entries[0].title.as_deref(), Some("Hello"));
         assert_eq!(entries[0].feed_id, 7);
         assert_eq!(entries[0].url.as_deref(), Some("https://example.com/a"));
+        assert_eq!(entries[0].author.as_deref(), Some("Ada Lovelace"));
         assert_eq!(entries[1].title, None);
         assert_eq!(entries[1].url, None);
+        assert_eq!(entries[1].author, None);
         assert_eq!(entries[1].published, None);
     }
 
