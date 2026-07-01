@@ -17,6 +17,8 @@ the build-out plan are in [`tui_research.md`](tui_research.md); CI is in [`ci.md
 | `tui` | The full-screen ratatui app: state (`App`), event loop, rendering, async orchestration. |
 | `images` | Fetch + render images to Unicode half-block art (`▀`). |
 | `browser` | Resolve and launch the user's browser for an article URL. |
+| `store` | Blocking SQLite offline cache (feeds/entries/read state) for offline-first startup — see [`persistence.md`](persistence.md). |
+| `text` | `strip_control_chars()` — defuse terminal-escape injection in feed-derived display fields. |
 | `theme` | The rose color palette (truecolor `Rgb` consts + a `lerp` for the gradient). |
 
 There is no `lib.rs`; everything is a private module of the binary except items marked `pub` for
@@ -36,8 +38,11 @@ cross-module use within the crate.
 - anything else → an error with usage.
 
 `connect()` is the shared login path: `config::load_credentials()` (or prompt via `config::login()`
-on first run) → `feedbin::Client::new(&creds)` → `client.authenticate()` (validates before the TUI
-takes over the screen, so a bad-password 401 surfaces as plain text).
+on first run) → `feedbin::Client::new(&creds)`. It **no longer authenticates up front** (TASK-41): the
+TUI is offline-first, so it paints from the local cache and validates lazily via the background load —
+a bad-password 401 or an offline box surfaces as an in-app notice, not a pre-TUI error. (`roses list`
+still hits the network immediately, so it reports auth errors on its first request. `Client::authenticate()`
+is retained as a capability but off the startup path.)
 
 ## Concurrency model — sync UI loop + tokio blocking pool
 
@@ -46,9 +51,12 @@ is reused unchanged; the UI stays responsive by offloading every network/decode 
 **blocking thread pool** and reporting results back over a channel.
 
 - `tui::run` builds a **current-thread** tokio runtime and keeps a `Handle`. (Features: `tokio = {rt, sync}`.)
+- Before the loop, `run_loop` opens the **offline cache** (`store::Store`) and seeds `App` from it for an
+  instant first paint (TASK-41); the background fetch already spawned by `run` reconciles it.
 - The UI runs a **synchronous immediate-mode loop** (`run_loop`), not an async task. Each iteration:
-  1. Drain the `mpsc::UnboundedReceiver<Msg>` (`rx.try_recv()`), applying each `Msg` to `App`; decrement
-     the in-flight image counter on `Msg::Image`.
+  1. Drain the `mpsc::UnboundedReceiver<Msg>` (`rx.try_recv()`); for each `Msg`, `persist_msg` writes the
+     result through to the cache (main-thread store writes), then it's applied to `App` (decrementing the
+     in-flight image counter on `Msg::Image`).
   2. `terminal.draw(|f| app.draw(f))` — redraw the whole UI from `App` state.
   3. If the selected article changed, `app.prioritize_selected_images()` (bump its queued images).
   4. Drain the image pre-fetch queue up to `MAX_IMAGE_FETCHES` (6) concurrent.
@@ -302,6 +310,14 @@ redraw.
   `#[ignore]`d, Linux-only `keychain_round_trip_via_secret_service` test to verify the Secret Service
   path end-to-end (see [`ci.md`](ci.md)).
 
+## Persistence & offline cache (`store.rs`, TASK-41)
+
+A blocking **SQLite** cache under the XDG data dir makes the TUI **offline-first**: `run_loop` paints from
+the cache on launch, then the background load reconciles it (Feedbin stays the source of truth for read
+state). All cache writes happen on the main thread in `persist_msg` as messages drain, so the `Connection`
+never crosses threads. Full schema, sync strategy, and the `rusqlite`/musl trade-off are in
+[`persistence.md`](persistence.md).
+
 ## Dependencies (why)
 
 | Crate | Why |
@@ -310,6 +326,8 @@ redraw.
 | `tokio` (`rt`, `sync`) | Current-thread runtime + `spawn_blocking` pool + `mpsc` channel. |
 | `reqwest` 0.13 (`blocking, json, query, rustls`) | Feedbin HTTP client; rustls for painless static builds. |
 | `serde` (derive) + `toml` | Typed Feedbin models + config (de)serialization. |
+| `rusqlite` 0.40 (`bundled`) | SQLite offline cache (TASK-41). `bundled` compiles SQLite from source (no system libsqlite3); it re-adds a C-compiled dep to the musl build — see [`persistence.md`](persistence.md). |
+| `serde_json` | Serialize `Entry` to the cache's JSON blob column. |
 | `keyring` 4 (macOS `apple-native-keyring-store`, Linux `zbus-secret-service-keyring-store`) | OS keychain for the password; the pure-Rust zbus Secret Service backend keeps the musl build free of C libdbus. |
 | `rpassword` | Hidden password prompt on first run. |
 | `dirs` | Home directory for the XDG fallback. |

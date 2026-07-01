@@ -28,6 +28,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::browser;
 use crate::config::BrowserPref;
 use crate::feedbin::{Client, Enclosure, Entry};
+use crate::store::Store;
 use crate::text::strip_control_chars;
 use crate::theme;
 
@@ -438,7 +439,15 @@ impl App {
                 self.reset_selection();
                 self.refill_image_queue();
             }
-            Msg::Loaded(Err(err)) => self.status = Status::Failed(err),
+            Msg::Loaded(Err(err)) => {
+                if self.entries.is_empty() {
+                    self.status = Status::Failed(err);
+                } else {
+                    // Offline-first: a failed refresh keeps the cached view
+                    // usable — surface a notice instead of blanking it (TASK-41).
+                    self.notice = Some(format!("Couldn't reach Feedbin — showing cached: {err}"));
+                }
+            }
 
             Msg::Write {
                 op: WriteOp::MarkRead,
@@ -1560,6 +1569,38 @@ fn spawn_load_more(handle: &Handle, client: &Client, tx: &UnboundedSender<Msg>, 
     });
 }
 
+/// Write a background result through to the offline cache (TASK-41). Called on
+/// the main thread as messages drain, so the `Store` never crosses threads.
+/// Cache errors are swallowed — persistence is best-effort and never overrides
+/// the network truth or blocks the UI.
+fn persist_msg(store: &mut Store, msg: &Msg) {
+    match msg {
+        Msg::Loaded(Ok(loaded)) => {
+            // The full unread set is the hydrated entries plus the un-hydrated
+            // pending ids; cached entries no longer in it are marked read.
+            let unread_ids: Vec<i64> = loaded
+                .entries
+                .iter()
+                .map(|e| e.id)
+                .chain(loaded.pending_ids.iter().copied())
+                .collect();
+            let _ = store.replace_snapshot(&loaded.entries, &loaded.feed_titles, &unread_ids);
+        }
+        Msg::LoadedMore(Ok(more)) => {
+            let _ = store.upsert_entries(more);
+        }
+        Msg::Write {
+            op,
+            entry,
+            result: Ok(()),
+            ..
+        } => {
+            let _ = store.set_unread(entry.id, matches!(op, WriteOp::Undo));
+        }
+        _ => {}
+    }
+}
+
 /// Blocking fetch of the newest unread entries plus their feed names.
 fn load(client: &Client) -> Result<Loaded> {
     let mut unread = client.unread_entry_ids()?;
@@ -1642,6 +1683,21 @@ fn run_loop(
     browser_pref: &BrowserPref,
 ) -> Result<()> {
     let mut app = App::new();
+    // Open the offline cache and paint from it immediately; the background fetch
+    // (already spawned by `run`) reconciles it (TASK-41). A cache failure is
+    // non-fatal — roses just runs without persistence.
+    let mut store = Store::open().ok();
+    if let Some(store) = &store
+        && let Ok(snap) = store.load_unread(DISPLAY_LIMIT)
+        && !snap.entries.is_empty()
+    {
+        app.apply(Msg::Loaded(Ok(Loaded {
+            entries: snap.entries,
+            feed_titles: snap.feed_titles,
+            total_unread: snap.total_unread,
+            pending_ids: Vec::new(),
+        })));
+    }
     let mut images_in_flight = 0usize;
     let mut last_selected = None;
     while !app.should_quit {
@@ -1651,6 +1707,11 @@ fn run_loop(
         while let Ok(msg) = rx.try_recv() {
             if matches!(msg, Msg::Image { .. }) {
                 images_in_flight = images_in_flight.saturating_sub(1);
+            }
+            // Persist network results to the cache before applying them (main-
+            // thread store writes; the cache seed above doesn't come via `rx`).
+            if let Some(store) = store.as_mut() {
+                persist_msg(store, &msg);
             }
             app.apply(msg);
         }
@@ -2338,6 +2399,30 @@ mod tests {
             "the batch is restored to the front for retry"
         );
         assert!(app.notice.is_some(), "a failure notice is shown");
+    }
+
+    #[test]
+    fn failed_refresh_keeps_cached_view() {
+        // TASK-41 offline-first: a fetch error with cached entries present keeps
+        // them visible with a notice, rather than blanking to a Failed screen.
+        let mut app = App::new();
+        app.status = Status::Ready;
+        app.entries = vec![entry(1, 7, "E1", None)];
+        app.selected_source = Some(7);
+        app.selected_article = Some(1);
+
+        app.apply(Msg::Loaded(Err("offline".to_string())));
+        assert!(
+            matches!(app.status, Status::Ready),
+            "cached view is preserved"
+        );
+        assert!(app.notice.is_some(), "an offline notice is shown");
+        assert_eq!(app.entries.len(), 1, "cached entries kept");
+
+        // With nothing cached, a failure still surfaces as Failed.
+        let mut empty = App::new();
+        empty.apply(Msg::Loaded(Err("boom".to_string())));
+        assert!(matches!(empty.status, Status::Failed(_)));
     }
 
     #[test]

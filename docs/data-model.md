@@ -111,6 +111,16 @@ states: `Ready` → the art lines; `Failed` → `[image unavailable: <url>]`; ot
 
 ## Persisted & external storage
 
+### `store` — SQLite offline cache (TASK-41)
+
+A local SQLite DB at `$XDG_DATA_HOME/roses/roses.db` (or `~/.local/share/roses/roses.db`) caches feeds,
+entries, and read state so the TUI paints instantly and reads offline. Tables: `meta(key, value)` (schema
+version + future sync cursors), `feeds(feed_id, title)`, and `entries(id, feed_id, published, unread,
+starred, json)` — scalar columns for the unread query/sort plus a serialized-`Entry` JSON blob for full
+hydration. `starred` exists from v1 but is wired by TASK-29. `store::CachedSnapshot { entries, feed_titles,
+total_unread }` is the initial-paint payload. Feedbin stays the source of truth for read state; full schema
++ sync strategy are in [`persistence.md`](persistence.md).
+
 ### `config::Settings` → `config.toml`
 
 Serialized (TOML) under the config dir (`$XDG_CONFIG_HOME/roses/config.toml` or `~/.config/roses/config.toml`).

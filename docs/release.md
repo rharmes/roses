@@ -58,5 +58,12 @@ CI (see [`ci.md`](ci.md)).
   without one falls back to entering credentials each run (a clear error, no panic).
   macOS uses the native Keychain.
 - **No Windows build** (deliberate; the keyring backend isn't configured for it).
+- **SQLite is compiled from source.** The offline cache (TASK-41) uses
+  `rusqlite` with the `bundled` feature, which compiles SQLite (C) via `cc` — no
+  system `libsqlite3` needed, but it **re-adds a C-compiled dependency** to the
+  otherwise-C-free static-musl build (we'd kept it C-free for keyring's zbus
+  backend). `rusqlite`+`bundled` links cleanly under `*-unknown-linux-musl`;
+  **re-verify the musl release build on the next tag** after this lands. See
+  [`persistence.md`](persistence.md).
 
 [cargo-dist]: https://github.com/axodotdev/cargo-dist

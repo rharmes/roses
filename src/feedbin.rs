@@ -13,7 +13,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 use reqwest::Method;
 use reqwest::header::CONTENT_TYPE;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::config::Credentials;
 
@@ -42,7 +42,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// pane renders it to text. The `images`/`enclosure`/`json_feed` objects are
 /// only present with `mode=extended` (TASK-21/22/23). Remaining fields are
 /// ignored by serde.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(dead_code)] // `id` feeds the read/unread sync in TASK-7
 pub struct Entry {
     pub id: i64,
@@ -72,18 +72,18 @@ pub struct Entry {
 /// of the standard size (`size_1`) is used; the raw pixel dimensions Feedbin
 /// also provides aren't needed because the half-block renderer decodes the CDN
 /// image and sizes the art from its actual pixels.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EntryImages {
     pub size_1: Option<ImageSize>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImageSize {
     pub cdn_url: Option<String>,
 }
 
 /// The `enclosure` object (extended mode): a podcast/media attachment.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Enclosure {
     pub enclosure_url: Option<String>,
     pub enclosure_type: Option<String>,
@@ -92,7 +92,7 @@ pub struct Enclosure {
 
 /// The `json_feed` object (extended mode); `external_url` is the link a
 /// link-blog entry points *out* to (distinct from the permalink `url`).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JsonFeed {
     pub external_url: Option<String>,
 }
@@ -116,7 +116,7 @@ impl Entry {
 
 /// One Feedbin subscription. Used only to map a `feed_id` to its display title;
 /// the other fields (id, feed_url, site_url, created_at) are ignored.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Subscription {
     feed_id: i64,
     title: Option<String>,
@@ -179,7 +179,11 @@ impl Client {
     }
 
     /// Validate the stored credentials: `Ok(())` on HTTP 200, a clear error on
-    /// 401 (bad credentials) or any other failure (AC #2).
+    /// 401 (bad credentials) or any other failure (AC #2). No longer on the
+    /// startup path — the offline-first TUI validates lazily via the background
+    /// load (TASK-41) — but retained as a client capability (and to keep the
+    /// 401-mapping under test) for an explicit "verify login" use.
+    #[allow(dead_code)]
     pub fn authenticate(&self) -> Result<()> {
         let resp = self
             .get("authentication.json")
