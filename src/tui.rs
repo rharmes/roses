@@ -28,6 +28,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::browser;
 use crate::config::BrowserPref;
 use crate::feedbin::{Client, Enclosure, Entry};
+use crate::text::strip_control_chars;
 use crate::theme;
 
 /// How many of the newest unread entries to load.
@@ -225,6 +226,9 @@ impl App {
                 .or_else(|| e.external_url())
                 .map(str::to_string)
                 .or_else(|| e.url.clone())
+                // Strip control chars so a hostile url can't inject terminal
+                // escapes into the spawned browser command's arguments.
+                .map(|url| strip_control_chars(&url))
         })
     }
 
@@ -710,7 +714,7 @@ impl App {
             .iter()
             .map(|&(feed_id, count)| {
                 ListItem::new(Line::from(vec![
-                    Span::raw(self.feed_name(feed_id).to_string()),
+                    Span::raw(strip_control_chars(self.feed_name(feed_id))),
                     Span::raw("  "),
                     Span::styled(format!("({count})"), Style::new().dim()),
                 ]))
@@ -746,7 +750,8 @@ impl App {
                     .map(str::trim)
                     .filter(|t| !t.is_empty())
                     .unwrap_or("(untitled)");
-                let lines: Vec<Line> = wrap_title(title, width)
+                let title = strip_control_chars(title);
+                let lines: Vec<Line> = wrap_title(&title, width)
                     .into_iter()
                     .map(Line::from)
                     .collect();
@@ -1109,14 +1114,8 @@ fn reader_text(
     max_width: u16,
 ) -> Text<'static> {
     let mut lines: Vec<Line> = Vec::new();
-    lines.push(Line::from(
-        entry
-            .title
-            .clone()
-            .unwrap_or_else(|| "(untitled)".to_string())
-            .bold()
-            .fg(theme::ROSE),
-    ));
+    let title = strip_control_chars(entry.title.as_deref().unwrap_or("(untitled)"));
+    lines.push(Line::from(title.bold().fg(theme::ROSE)));
     // Meta line: author (if any) · formatted date (if any). The feed/blog name
     // is intentionally omitted — it's already the highlighted source on the
     // left, so we show the author instead when Feedbin gives us one (TASK-18),
@@ -1129,7 +1128,7 @@ fn reader_text(
         .map(str::trim)
         .filter(|a| !a.is_empty())
     {
-        meta_parts.push(author.to_string());
+        meta_parts.push(strip_control_chars(author));
     }
     if let Some(date) = entry.published.as_deref().and_then(format_published) {
         meta_parts.push(date);
@@ -1139,19 +1138,19 @@ fn reader_text(
     }
     // Podcast/media indicator when there's an enclosure (TASK-22).
     if let Some(enc) = &entry.enclosure {
-        lines.push(Line::from(podcast_indicator(enc)).dim());
+        lines.push(Line::from(strip_control_chars(&podcast_indicator(enc))).dim());
     }
     // Link line(s): a link-blog entry points out to `external_url`, so show that
     // as the primary link (what `o` opens) and keep the permalink visible so it
     // stays accessible (TASK-23). Otherwise just the entry url.
     match (entry.external_url(), &entry.url) {
         (Some(external), permalink) => {
-            lines.push(Line::from(external.to_string().underlined()));
+            lines.push(Line::from(strip_control_chars(external).underlined()));
             if let Some(url) = permalink {
-                lines.push(Line::from(format!("permalink: {url}")).dim());
+                lines.push(Line::from(format!("permalink: {}", strip_control_chars(url))).dim());
             }
         }
-        (None, Some(url)) => lines.push(Line::from(url.clone().underlined())),
+        (None, Some(url)) => lines.push(Line::from(strip_control_chars(url).underlined())),
         (None, None) => {}
     }
     lines.push(Line::from(""));
@@ -2048,6 +2047,33 @@ mod tests {
         // Wholly absent published + author is likewise clean.
         let none = render_reader(&header_entry(None, None));
         assert!(!none.contains(" · "), "no meta separator: {none:?}");
+    }
+
+    #[test]
+    fn reader_header_strips_control_characters_from_title_author_and_url() {
+        // TASK-27: a hostile feed embeds ESC/BEL in the header fields. They must
+        // be stripped so no escape sequence reaches the terminal, while the
+        // visible text survives.
+        let mut e = header_entry(Some("Auth\x07or"), None);
+        e.title = Some("Ti\x1btle".to_string());
+        e.url = Some("https://example.com/\x1bpath".to_string());
+        let rendered = render_reader(&e);
+        assert!(
+            !rendered.contains('\u{1b}') && !rendered.contains('\u{7}'),
+            "no control chars may survive in the header: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("Title"),
+            "visible title kept: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("Author"),
+            "visible author kept: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("https://example.com/path"),
+            "visible url kept: {rendered:?}"
+        );
     }
 
     #[test]

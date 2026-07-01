@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::fmt::Write;
 
 use crate::feedbin::Entry;
+use crate::text::strip_control_chars;
 
 const NO_TITLE: &str = "(untitled)";
 const NO_FEED: &str = "(unknown feed)";
@@ -36,15 +37,19 @@ pub fn format_unread(
     );
 
     for (i, entry) in entries.iter().enumerate() {
-        let title = entry.title.as_deref().unwrap_or(NO_TITLE);
-        let feed = feed_titles
-            .get(&entry.feed_id)
-            .map(String::as_str)
-            .unwrap_or(NO_FEED);
+        // Strip control chars so a hostile feed can't inject terminal escape
+        // sequences via a title/feed name/url printed to the user's terminal.
+        let title = strip_control_chars(entry.title.as_deref().unwrap_or(NO_TITLE));
+        let feed = strip_control_chars(
+            feed_titles
+                .get(&entry.feed_id)
+                .map(String::as_str)
+                .unwrap_or(NO_FEED),
+        );
         let _ = writeln!(out, "{}. {title}", i + 1);
         match entry.url.as_deref() {
             Some(url) => {
-                let _ = writeln!(out, "   {feed} · {url}");
+                let _ = writeln!(out, "   {feed} · {}", strip_control_chars(url));
             }
             None => {
                 let _ = writeln!(out, "   {feed}");

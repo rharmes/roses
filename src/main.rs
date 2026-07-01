@@ -12,6 +12,7 @@ mod browser;
 mod config;
 mod feedbin;
 mod images;
+mod text;
 mod theme;
 mod tui;
 mod ui;
