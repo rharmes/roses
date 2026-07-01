@@ -62,8 +62,10 @@ CI (see [`ci.md`](ci.md)).
   `rusqlite` with the `bundled` feature, which compiles SQLite (C) via `cc` — no
   system `libsqlite3` needed, but it **re-adds a C-compiled dependency** to the
   otherwise-C-free static-musl build (we'd kept it C-free for keyring's zbus
-  backend). `rusqlite`+`bundled` links cleanly under `*-unknown-linux-musl`;
-  **re-verify the musl release build on the next tag** after this lands. See
-  [`persistence.md`](persistence.md).
+  backend). `rusqlite`+`bundled` links cleanly under `*-unknown-linux-musl`, and
+  CI's **`musl-build`** job (TASK-43) verifies the `x86_64-unknown-linux-musl`
+  build + static linking on every push/PR. See [`ci.md`](ci.md) /
+  [`persistence.md`](persistence.md). (aarch64-musl, also in the matrix, is not
+  yet CI-built — it needs a cross C toolchain.)
 
 [cargo-dist]: https://github.com/axodotdev/cargo-dist
