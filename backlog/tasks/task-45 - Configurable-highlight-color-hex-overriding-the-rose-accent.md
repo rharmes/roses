@@ -1,9 +1,11 @@
 ---
 id: TASK-45
 title: Configurable highlight color (hex) overriding the rose accent
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@ross'
 created_date: '2026-07-01 22:20'
+updated_date: '2026-07-01 23:40'
 labels:
   - feature
   - ux
@@ -20,8 +22,14 @@ The UI accent color is hard-coded to theme::ROSE (TASK-14) and applied to chrome
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A config.toml setting (e.g. highlight_color) accepts a hex color and, when set, replaces the rose accent everywhere it is used (focused border/title, selection bar, reader title, footer keys)
-- [ ] #2 Unset or invalid hex falls back to the built-in rose default with no panic (invalid values are ignored)
-- [ ] #3 The hex-to-Color parser is unit-tested: accepts #rrggbb and rrggbb, rejects malformed input
-- [ ] #4 The setting is documented in README (Config), docs/data-model.md (Settings), and docs/architecture.md (theme accent)
+- [x] #1 A config.toml setting (e.g. highlight_color) accepts a hex color and, when set, replaces the rose accent everywhere it is used (focused border/title, selection bar, reader title, footer keys)
+- [x] #2 Unset or invalid hex falls back to the built-in rose default with no panic (invalid values are ignored)
+- [x] #3 The hex-to-Color parser is unit-tested: accepts #rrggbb and rrggbb, rejects malformed input
+- [x] #4 The setting is documented in README (Config), docs/data-model.md (Settings), and docs/architecture.md (theme accent)
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Implemented on branch task-45-highlight-color. Added Settings.highlight_color (Option<String>) + config::load_highlight_color(); theme::parse_hex() accepts #rrggbb/rrggbb + 3-digit #rgb (case-insensitive, optional #, trims ws), rejects malformed -> None. run() resolves once: load_highlight_color -> parse_hex -> unwrap_or(ROSE), stored on App.base_accent. accent() returns MUTED under help else base_accent; column_block/highlight use accent(); footer_help/help_lines/draw_help_overlay/reader_text + the confirm-prompt take the accent (base_accent, un-muted). Chrome only — the caught-up rose mascot keeps its own gradient (per interview). Bundled browser_pref/refresh_interval/accent into UiConfig to stay under clippy's 7-arg limit (repo had no existing allows). Tests: parse_hex accepts/rejects (theme), highlight_color toml round-trip (config), render test asserting focused border+selection+reader title+footer keys all take a configured blue with NO rose leaking (AC #1), and the mascot-stays-rose render test. 127 pass, fmt+clippy clean, 5x stable. Docs: README config block, data-model Settings table+example, architecture Theme section + config list.
+<!-- SECTION:NOTES:END -->

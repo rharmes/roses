@@ -210,6 +210,10 @@ struct App {
     pending_confirm: Option<Confirm>,
     /// Whether the keybinding help overlay is open (`?` toggles it — TASK-32).
     show_help: bool,
+    /// The resolved accent color (rose by default, or the user's `highlight_color`
+    /// — TASK-45). Set once from config; `accent()` layers the help-overlay mute
+    /// on top. Chrome only — the "all caught up" rose mascot keeps its own palette.
+    base_accent: Color,
     should_quit: bool,
 }
 
@@ -237,6 +241,7 @@ impl App {
             notice: None,
             pending_confirm: None,
             show_help: false,
+            base_accent: theme::ROSE,
             should_quit: false,
         }
     }
@@ -911,11 +916,13 @@ impl App {
         // A pending confirmation (TASK-30) takes over the footer — accented, not
         // red — over any notice or the normal help.
         let footer_line = if let Some(prompt) = self.confirm_prompt() {
-            Line::from(format!(" {prompt} ")).fg(theme::ROSE).bold()
+            Line::from(format!(" {prompt} "))
+                .fg(self.base_accent)
+                .bold()
         } else {
             match &self.notice {
                 Some(text) => Line::from(format!(" {text} ")).red(),
-                None => footer_help(),
+                None => footer_help(self.base_accent),
             }
         };
         // Right-aligned footer slot: the image loading indicator while images are
@@ -956,19 +963,20 @@ impl App {
         // The help overlay floats above everything else (TASK-32); it's pure
         // chrome, so the underlying App state (selection, loads) is untouched.
         if self.show_help {
-            draw_help_overlay(frame, main);
+            draw_help_overlay(frame, main, self.base_accent);
         }
     }
 
-    /// The accent color for focused chrome + the selection bar: the rose accent
-    /// normally, muted to grey while the help overlay is open so the overlay
-    /// draws the eye (TASK-46). Purely a display choice — focus/selection state
-    /// is untouched, and the overlay/footer/reader-title keep their own rose.
+    /// The accent color for focused chrome + the selection bar: the configured
+    /// accent (`base_accent`, rose by default — TASK-45), muted to grey while the
+    /// help overlay is open so the overlay draws the eye (TASK-46). Purely a
+    /// display choice — focus/selection state is untouched, and the
+    /// overlay/footer/reader-title read `base_accent` directly (never muted).
     fn accent(&self) -> Color {
         if self.show_help {
             theme::MUTED
         } else {
-            theme::ROSE
+            self.base_accent
         }
     }
 
@@ -1095,7 +1103,8 @@ impl App {
         let Some(entry) = self.entries.iter().find(|e| e.id == entry_id) else {
             return false;
         };
-        let text = reader_text(entry, &self.images, width);
+        // `base_accent` is constant for the process, so it needn't key the cache.
+        let text = reader_text(entry, &self.images, width, self.base_accent);
         let wrapped = Paragraph::new(text.clone())
             .wrap(Wrap { trim: false })
             .line_count(width) as u16;
@@ -1265,8 +1274,9 @@ const BINDINGS: &[Binding] = &[
 ];
 
 /// The 1-line footer hint: the footer-flagged bindings as `keys label · …`, keys
-/// accented rose and labels dim, derived from [`BINDINGS`] so it never drifts.
-fn footer_help() -> Line<'static> {
+/// in the `accent` color and labels dim, derived from [`BINDINGS`] so it never
+/// drifts. `accent` is the configured highlight color (TASK-45).
+fn footer_help(accent: Color) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = vec![Span::raw(" ")];
     let mut first = true;
     for b in BINDINGS {
@@ -1277,7 +1287,7 @@ fn footer_help() -> Line<'static> {
             spans.push(Span::raw(" · ").dim());
         }
         first = false;
-        spans.push(Span::styled(keys, Style::new().fg(theme::ROSE).bold()));
+        spans.push(Span::styled(keys, Style::new().fg(accent).bold()));
         spans.push(Span::raw(format!(" {label}")).dim());
     }
     spans.push(Span::raw(" "));
@@ -1285,9 +1295,9 @@ fn footer_help() -> Line<'static> {
 }
 
 /// The help-overlay body (TASK-32): every binding, grouped under bold headings,
-/// with a rose-accented key column aligned to the widest key. Built from the same
-/// [`BINDINGS`] table as the footer.
-fn help_lines() -> Vec<Line<'static>> {
+/// with an `accent`-colored key column aligned to the widest key. Built from the
+/// same [`BINDINGS`] table as the footer.
+fn help_lines(accent: Color) -> Vec<Line<'static>> {
     let key_w = BINDINGS
         .iter()
         .map(|b| UnicodeWidthStr::width(b.keys))
@@ -1306,7 +1316,7 @@ fn help_lines() -> Vec<Line<'static>> {
         let pad = key_w.saturating_sub(UnicodeWidthStr::width(b.keys)) + 2;
         lines.push(Line::from(vec![
             Span::raw("  "),
-            Span::styled(b.keys, Style::new().fg(theme::ROSE).bold()),
+            Span::styled(b.keys, Style::new().fg(accent).bold()),
             Span::raw(" ".repeat(pad)),
             Span::raw(b.desc),
         ]));
@@ -1314,11 +1324,11 @@ fn help_lines() -> Vec<Line<'static>> {
     lines
 }
 
-/// Draw the keybinding help overlay: a centered, rose-bordered box floating over
-/// `area`, sized to its content (clamped to `area`). Pure chrome — it reads no
-/// mutable state, so background loading and selection are unaffected (TASK-32).
-fn draw_help_overlay(frame: &mut Frame, area: Rect) {
-    let lines = help_lines();
+/// Draw the keybinding help overlay: a centered, `accent`-bordered box floating
+/// over `area`, sized to its content (clamped to `area`). Pure chrome — it reads
+/// no mutable state, so background loading and selection are unaffected (TASK-32).
+fn draw_help_overlay(frame: &mut Frame, area: Rect, accent: Color) {
+    let lines = help_lines(accent);
     let content_w = lines.iter().map(Line::width).max().unwrap_or(0) as u16;
     let title = " Keyboard shortcuts ";
     let title_w = UnicodeWidthStr::width(title) as u16;
@@ -1327,8 +1337,8 @@ fn draw_help_overlay(frame: &mut Frame, area: Rect) {
     let height = (lines.len() as u16 + 2).min(area.height); // + top/bottom border
     let rect = centered_rect(area, width, height);
     let block = Block::bordered()
-        .border_style(Style::new().fg(theme::ROSE))
-        .title(Span::styled(title, Style::new().fg(theme::ROSE).bold()))
+        .border_style(Style::new().fg(accent))
+        .title(Span::styled(title, Style::new().fg(accent).bold()))
         .padding(Padding::horizontal(1));
     frame.render_widget(Clear, rect);
     frame.render_widget(Paragraph::new(lines).block(block), rect);
@@ -1597,10 +1607,11 @@ fn reader_text(
     entry: &Entry,
     images: &HashMap<String, ImageState>,
     max_width: u16,
+    accent: Color,
 ) -> Text<'static> {
     let mut lines: Vec<Line> = Vec::new();
     let title = strip_control_chars(entry.title.as_deref().unwrap_or("(untitled)"));
-    lines.push(Line::from(title.bold().fg(theme::ROSE)));
+    lines.push(Line::from(title.bold().fg(accent)));
     // Meta line: author (if any) · formatted date (if any). The feed/blog name
     // is intentionally omitted — it's already the highlighted source on the
     // left, so we show the author instead when Feedbin gives us one (TASK-18),
@@ -2033,6 +2044,13 @@ pub fn run(client: Client) -> Result<()> {
     let browser_pref = crate::config::load_browser_pref().unwrap_or_default();
     // Optional background auto-refresh; `None` (unset/zero) leaves it off (TASK-37).
     let refresh_interval = crate::config::load_refresh_interval().unwrap_or(None);
+    // Optional accent override; an unset/invalid `highlight_color` falls back to
+    // the rose default (TASK-45).
+    let accent = crate::config::load_highlight_color()
+        .unwrap_or(None)
+        .as_deref()
+        .and_then(theme::parse_hex)
+        .unwrap_or(theme::ROSE);
 
     let (tx, mut rx) = mpsc::unbounded_channel::<Msg>();
 
@@ -2043,8 +2061,11 @@ pub fn run(client: Client) -> Result<()> {
         &client,
         &tx,
         &mut rx,
-        &browser_pref,
-        refresh_interval,
+        UiConfig {
+            browser_pref: &browser_pref,
+            refresh_interval,
+            accent,
+        },
     );
     ratatui::restore();
     result
@@ -2077,16 +2098,30 @@ fn preview_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
     }
 }
 
+/// User-configuration inputs for the UI loop, bundled so the arg list stays lean.
+struct UiConfig<'a> {
+    browser_pref: &'a BrowserPref,
+    /// Background auto-refresh interval, `None` when disabled (TASK-37).
+    refresh_interval: Option<Duration>,
+    /// Resolved accent color — rose default or the user's override (TASK-45).
+    accent: Color,
+}
+
 fn run_loop(
     terminal: &mut DefaultTerminal,
     handle: &Handle,
     client: &Client,
     tx: &UnboundedSender<Msg>,
     rx: &mut mpsc::UnboundedReceiver<Msg>,
-    browser_pref: &BrowserPref,
-    refresh_interval: Option<Duration>,
+    config: UiConfig<'_>,
 ) -> Result<()> {
+    let UiConfig {
+        browser_pref,
+        refresh_interval,
+        accent,
+    } = config;
     let mut app = App::new();
+    app.base_accent = accent;
     // Open the offline cache and paint from it immediately (TASK-41); a cache
     // failure is non-fatal — roses just runs without persistence.
     let mut store = Store::open().ok();
@@ -2699,7 +2734,7 @@ mod tests {
     fn footer_moves_bulk_marks_into_the_overlay() {
         // The footer no longer hints M/A (they moved to the overlay) but gains
         // the `?` help hint — both derived from the single BINDINGS table.
-        let footer: String = footer_help()
+        let footer: String = footer_help(theme::ROSE)
             .spans
             .iter()
             .map(|s| s.content.as_ref())
@@ -2714,7 +2749,7 @@ mod tests {
             "bulk window hint left the footer"
         );
 
-        let overlay: String = help_lines()
+        let overlay: String = help_lines(theme::ROSE)
             .iter()
             .flat_map(|l| l.spans.iter())
             .map(|s| s.content.as_ref())
@@ -2981,7 +3016,7 @@ mod tests {
             json_feed: None,
         };
         let collect = |images: &HashMap<String, ImageState>| -> String {
-            reader_text(&entry, images, 80)
+            reader_text(&entry, images, 80, theme::ROSE)
                 .lines
                 .iter()
                 .flat_map(|line| line.spans.iter().map(|span| span.content.to_string()))
@@ -3001,7 +3036,7 @@ mod tests {
 
     /// Flatten a rendered reader `Text` into one newline-joined string.
     fn render_reader(entry: &Entry) -> String {
-        reader_text(entry, &HashMap::new(), 80)
+        reader_text(entry, &HashMap::new(), 80, theme::ROSE)
             .lines
             .iter()
             .flat_map(|line| line.spans.iter().map(|span| span.content.to_string()))
@@ -3315,7 +3350,7 @@ mod tests {
         images.insert(url.to_string(), ImageState::Ready(vec![wide]));
 
         // Render into a reader only 6 columns wide.
-        let text = reader_text(&entry, &images, 6);
+        let text = reader_text(&entry, &images, 6, theme::ROSE);
         for line in &text.lines {
             let w: usize = line.spans.iter().map(|s| s.content.width()).sum();
             assert!(
@@ -3489,7 +3524,7 @@ mod tests {
 
     /// Flatten a rendered reader into a newline-joined string.
     fn flatten_reader(entry: &Entry, images: &HashMap<String, ImageState>) -> String {
-        reader_text(entry, images, 80)
+        reader_text(entry, images, 80, theme::ROSE)
             .lines
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
@@ -4051,6 +4086,61 @@ mod tests {
                 "selection rose again after close"
             );
         }
+    }
+
+    #[test]
+    fn configured_highlight_color_recolors_all_chrome() {
+        // TASK-45 AC #1: a configured accent replaces rose everywhere it's used
+        // (focused border/title, selection bar, reader title, footer keys) — and
+        // nothing is missed (no rose leaks into the chrome).
+        const BLUE: Color = Color::Rgb(0x5f, 0xaf, 0xff);
+        let mut app = app_with(&[(9, "Hacker News", 2)]);
+        app.base_accent = BLUE;
+        app.focus_right(); // focus Articles so the reader shows the article
+        let backend = ratatui::backend::TestBackend::new(120, 20);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|f| app.draw(f)).unwrap();
+        let b = terminal.backend().buffer();
+        let cell = |x: u16, y: u16| b.cell((x, y)).unwrap();
+
+        assert_eq!(cell(50, 0).fg, BLUE, "focused border uses the accent");
+        assert_eq!(cell(32, 1).fg, BLUE, "selection bar uses the accent");
+        assert_eq!(cell(74, 1).fg, BLUE, "reader title uses the accent");
+        assert!(
+            (0..120).any(|x| b.cell((x, 19)).unwrap().fg == BLUE),
+            "footer keys use the accent"
+        );
+        // With an accent configured and no mascot on screen, no rose remains.
+        let rose_leak =
+            (0..20u16).any(|y| (0..120u16).any(|x| b.cell((x, y)).unwrap().fg == theme::ROSE));
+        assert!(
+            !rose_leak,
+            "no rose accent leaks once a highlight color is set"
+        );
+    }
+
+    #[test]
+    fn configured_accent_leaves_the_caught_up_rose_alone() {
+        // The mascot keeps its own rose palette; only the chrome (here, the
+        // footer keys) takes the configured accent.
+        const BLUE: Color = Color::Rgb(0x5f, 0xaf, 0xff);
+        let mut app = App::new();
+        app.base_accent = BLUE;
+        app.apply(Msg::Loaded(Ok(Loaded {
+            entries: vec![],
+            feed_titles: HashMap::new(),
+            total_unread: 0,
+            pending_ids: Vec::new(),
+        }))); // Ready + empty → the caught-up rose
+        let backend = ratatui::backend::TestBackend::new(60, 20);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|f| app.draw(f)).unwrap();
+        let b = terminal.backend().buffer();
+        let any = |c: Color| {
+            (0..b.area.height).any(|y| (0..b.area.width).any(|x| b.cell((x, y)).unwrap().fg == c))
+        };
+        assert!(any(theme::ROSE_LIGHT), "the mascot keeps its rose petals");
+        assert!(any(BLUE), "footer keys still take the configured accent");
     }
 
     #[test]

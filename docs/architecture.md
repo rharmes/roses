@@ -180,6 +180,14 @@ letters and the arrow glyphs (`footer_help()`; the word labels stay dim). Feed n
 counts, meta, url, and body stay neutral. The palette lives in `theme` (truecolor `Rgb`; non-truecolor terminals downsample, and the
 bold/dim/reversed modifiers still carry focus/selection).
 
+**The accent is user-configurable (TASK-45).** A `highlight_color` in `config.toml` (hex `#rrggbb`/`rrggbb`
+or 3-digit `#rgb`, parsed by `theme::parse_hex`) overrides `theme::ROSE`; an unset/invalid value falls back
+to rose. `run()` resolves it once and stores it on `App.base_accent`, and every chrome site reads that
+instead of the `ROSE` const: `column_block`/`highlight` via `accent()` (which also layers the TASK-46
+help-overlay grey mute on top), and the footer/overlay/reader-title via `base_accent` directly. Only the
+chrome recolors — the `draw_caught_up()` rose keeps its own light→deep gradient + green stem, so the mascot
+stays a rose whatever the accent.
+
 When nothing is unread (`Status::Ready` + empty `entries`), `draw()` short-circuits to `draw_caught_up()`
 instead of the three columns: a vertically-centered ASCII rose with petals graded light→deep rose
 (`theme::lerp`) over a green stem, and an *All caught up* caption in the default text color. The footer
@@ -339,10 +347,11 @@ redraw.
 ## Config & credentials (`config.rs`)
 
 - Config dir: `$XDG_CONFIG_HOME/roses` if set & non-empty, else `~/.config/roses` (honored on macOS too).
-- `config.toml` holds non-secret `Settings`: `email`, `browser`, `browser_terminal`, and
+- `config.toml` holds non-secret `Settings`: `email`, `browser`, `browser_terminal`,
   `refresh_interval_secs` (auto-refresh cadence; `load_refresh_interval()` maps it to an `Option<Duration>`,
-  disabling on unset/zero and clamping sub-60 s up to a politeness floor — TASK-37). (`.gitignore`s
-  `config.toml` defensively.)
+  disabling on unset/zero and clamping sub-60 s up to a politeness floor — TASK-37), and `highlight_color`
+  (accent override; `load_highlight_color()` returns the raw hex string, resolved to a `Color` by
+  `theme::parse_hex` with a rose fallback — TASK-45). (`.gitignore`s `config.toml` defensively.)
 - The **password lives only in the OS keychain** (`keyring`, service `"roses"`, username = email). The
   backend is **cfg-gated per platform**: macOS uses the native Keychain (`apple-native-keyring-store`),
   Linux the Secret Service via the pure-Rust *zbus* backend (`zbus-secret-service-keyring-store`, so the

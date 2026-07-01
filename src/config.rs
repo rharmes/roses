@@ -39,6 +39,9 @@ struct Settings {
     /// Background auto-refresh interval, in seconds. `0` or unset disables it;
     /// values below `MIN_REFRESH_SECS` are clamped up (TASK-37).
     refresh_interval_secs: Option<u64>,
+    /// Accent color as a hex string (`#rrggbb`/`#rgb`), overriding the rose
+    /// default. Unset or unparseable falls back to rose (TASK-45).
+    highlight_color: Option<String>,
 }
 
 /// The user's browser preference from config. `$BROWSER` and the platform
@@ -177,6 +180,13 @@ pub fn load_refresh_interval() -> Result<Option<Duration>> {
     ))
 }
 
+/// The raw `highlight_color` hex string from config, if set (TASK-45). Parsing
+/// (and the fall-back to the rose default on an invalid value) is the caller's
+/// job, via `theme::parse_hex` — so config stays free of UI-color types.
+pub fn load_highlight_color() -> Result<Option<String>> {
+    Ok(load_settings()?.highlight_color)
+}
+
 /// Load the user's browser preference from the config file (empty if unset).
 pub fn load_browser_pref() -> Result<BrowserPref> {
     let settings = load_settings()?;
@@ -281,6 +291,17 @@ mod tests {
         let text = toml::to_string_pretty(&settings).unwrap();
         let parsed: Settings = toml::from_str(&text).unwrap();
         assert_eq!(parsed.refresh_interval_secs, Some(600));
+    }
+
+    #[test]
+    fn highlight_color_round_trips_through_toml() {
+        let settings = Settings {
+            highlight_color: Some("#af5f87".to_string()),
+            ..Default::default()
+        };
+        let text = toml::to_string_pretty(&settings).unwrap();
+        let parsed: Settings = toml::from_str(&text).unwrap();
+        assert_eq!(parsed.highlight_color.as_deref(), Some("#af5f87"));
     }
 
     #[test]
