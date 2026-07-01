@@ -133,6 +133,11 @@ struct App {
     images: HashMap<String, ImageState>,
     /// Image URLs awaiting a fetch slot, in priority order (pre-fetch queue).
     image_queue: VecDeque<String>,
+    /// Every distinct image URL in the current load, in on-screen order; drives
+    /// the "Loading N of M images" progress count (TASK-19).
+    image_urls: Vec<String>,
+    /// Animation frame for the loading spinner, advanced once per UI tick.
+    spinner_tick: usize,
     /// Inner width of the reader pane from the last draw, used to size images.
     reader_width: u16,
     /// Marked-read entries that can be restored, most recent last.
@@ -155,6 +160,8 @@ impl App {
             reader_scroll: 0,
             images: HashMap::new(),
             image_queue: VecDeque::new(),
+            image_urls: Vec::new(),
+            spinner_tick: 0,
             reader_width: 0,
             undo_stack: Vec::new(),
             notice: None,
@@ -236,12 +243,20 @@ impl App {
     /// once.
     fn refill_image_queue(&mut self) {
         let source_ids: Vec<i64> = self.sources().into_iter().map(|(id, _)| id).collect();
+        // Record every distinct image URL of the current load (in on-screen
+        // order) for the progress count, queueing the ones not yet cached.
+        let mut urls = Vec::new();
+        let mut seen = HashSet::new();
         for feed_id in source_ids {
             for article_id in self.article_ids(feed_id) {
                 let Some(entry) = self.entries.iter().find(|e| e.id == article_id) else {
                     continue;
                 };
                 for url in self.article_image_urls(entry) {
+                    if !seen.insert(url.clone()) {
+                        continue;
+                    }
+                    urls.push(url.clone());
                     if !self.images.contains_key(&url) {
                         self.images.insert(url.clone(), ImageState::Loading);
                         self.image_queue.push_back(url);
@@ -249,6 +264,29 @@ impl App {
                 }
             }
         }
+        self.image_urls = urls;
+    }
+
+    /// Progress of the current load's image fetches as `(done, total)`, or `None`
+    /// when there's nothing to show — no images, or all have resolved. `done`
+    /// counts images that reached `Ready` or `Failed`; `total` is the whole load.
+    /// Drives the footer loading indicator (TASK-19).
+    fn image_progress(&self) -> Option<(usize, usize)> {
+        let total = self.image_urls.len();
+        if total == 0 {
+            return None;
+        }
+        let done = self
+            .image_urls
+            .iter()
+            .filter(|u| {
+                matches!(
+                    self.images.get(*u),
+                    Some(ImageState::Ready(_)) | Some(ImageState::Failed)
+                )
+            })
+            .count();
+        (done < total).then_some((done, total))
     }
 
     /// Pop the next image URL to fetch (already marked `Loading`).
@@ -579,7 +617,24 @@ impl App {
             Some(text) => Line::from(format!(" {text} ")).red(),
             None => footer_help(),
         };
-        frame.render_widget(footer_line, footer);
+        match self.image_progress() {
+            // Reserve the right columns for the loading indicator so it never
+            // overlaps the help; the help side flexes and truncates if narrow.
+            Some((done, total)) => {
+                let indicator = loading_indicator(done, total, self.spinner_tick);
+                let width = indicator.chars().count() as u16 + 1;
+                let [help_area, indicator_area] =
+                    Layout::horizontal([Constraint::Min(0), Constraint::Length(width)])
+                        .areas(footer);
+                frame.render_widget(footer_line, help_area);
+                frame.render_widget(
+                    Paragraph::new(Line::from(format!(" {indicator}")).dim())
+                        .alignment(Alignment::Right),
+                    indicator_area,
+                );
+            }
+            None => frame.render_widget(footer_line, footer),
+        }
     }
 
     fn column_block(&self, title: &'static str, focused: bool) -> Block<'static> {
@@ -782,6 +837,17 @@ fn footer_help() -> Line<'static> {
         key("q"),
         text(" quit "),
     ])
+}
+
+/// Braille spinner frames for the background-loading indicator (TASK-19).
+const SPINNER_FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+/// The lower-right loading indicator text, e.g. "⠙ Loading 4 of 19 images". Pure
+/// (the animation frame is passed in) so a test can assert it with a frozen
+/// `tick`, per the project's no-flaky-tests rule.
+fn loading_indicator(done: usize, total: usize, tick: usize) -> String {
+    let frame = SPINNER_FRAMES[tick % SPINNER_FRAMES.len()];
+    format!("{frame} Loading {done} of {total} images")
 }
 
 /// The "all caught up" rose (TASK-14): a vertically-centered ASCII rose graded
@@ -1355,6 +1421,9 @@ fn run_loop(
     let mut images_in_flight = 0usize;
     let mut last_selected = None;
     while !app.should_quit {
+        // Advance the spinner every iteration; the loop ticks ~every 100 ms
+        // (the `event::poll(TICK)` below), so it animates without input.
+        app.spinner_tick = app.spinner_tick.wrapping_add(1);
         while let Ok(msg) = rx.try_recv() {
             if matches!(msg, Msg::Image { .. }) {
                 images_in_flight = images_in_flight.saturating_sub(1);
@@ -1990,6 +2059,74 @@ mod tests {
         })));
         assert_eq!(app.next_queued_image().as_deref(), Some("https://x/1.png"));
         assert!(app.next_queued_image().is_none());
+    }
+
+    #[test]
+    fn loading_indicator_frames_and_text() {
+        // Frozen ticks give deterministic frames (no timing flakiness).
+        assert_eq!(loading_indicator(4, 19, 0), "⠋ Loading 4 of 19 images");
+        assert_eq!(loading_indicator(4, 19, 1), "⠙ Loading 4 of 19 images");
+        // The frame cycles with period 10.
+        assert_eq!(loading_indicator(0, 1, 10), "⠋ Loading 0 of 1 images");
+    }
+
+    #[test]
+    fn image_progress_counts_done_of_total_and_hides_when_idle() {
+        let mut feed_titles = HashMap::new();
+        feed_titles.insert(7, "Feed".to_string());
+        let mut app = App::new();
+        // Nothing loaded yet -> nothing to show.
+        assert_eq!(app.image_progress(), None);
+        app.apply(Msg::Loaded(Ok(Loaded {
+            entries: vec![
+                img_entry(1, 7, "https://x/1.png"),
+                img_entry(2, 7, "https://x/2.png"),
+            ],
+            feed_titles,
+            total_unread: 2,
+        })));
+        // Both queued (Loading): 0 of 2.
+        assert_eq!(app.image_progress(), Some((0, 2)));
+        // One resolves (Ready): 1 of 2.
+        app.images.insert(
+            "https://x/1.png".to_string(),
+            ImageState::Ready(vec![Line::from("art")]),
+        );
+        assert_eq!(app.image_progress(), Some((1, 2)));
+        // The other fails -> all resolved -> hidden.
+        app.images
+            .insert("https://x/2.png".to_string(), ImageState::Failed);
+        assert_eq!(app.image_progress(), None);
+    }
+
+    #[test]
+    fn footer_shows_loading_indicator_right_aligned_without_hiding_help() {
+        let mut feed_titles = HashMap::new();
+        feed_titles.insert(7, "Feed".to_string());
+        let mut app = App::new();
+        app.apply(Msg::Loaded(Ok(Loaded {
+            entries: vec![img_entry(1, 7, "https://x/1.png")],
+            feed_titles,
+            total_unread: 1,
+        })));
+        app.spinner_tick = 0; // freeze the animation frame
+        let backend = ratatui::backend::TestBackend::new(100, 20);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        // The footer is the last row.
+        let footer: String = (0..100)
+            .map(|x| buffer.cell((x, 19)).unwrap().symbol().to_string())
+            .collect();
+        assert!(
+            footer.contains("Loading 0 of 1 images"),
+            "indicator text present: {footer:?}"
+        );
+        assert!(footer.contains('⠋'), "frozen spinner frame: {footer:?}");
+        // Help text is intact and the indicator sits to its right.
+        let move_at = footer.find("move").expect("help still shown");
+        let loading_at = footer.find("Loading").unwrap();
+        assert!(loading_at > move_at, "indicator right of help: {footer:?}");
     }
 
     #[test]

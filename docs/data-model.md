@@ -55,6 +55,8 @@ roses loads the newest `DISPLAY_LIMIT` (50) of them and hydrates those into `Ent
 | `reader_scroll` | `u16` | Reader vertical scroll offset (clamped to wrapped height each draw). |
 | `images` | `HashMap<String, ImageState>` | Per-URL image cache. |
 | `image_queue` | `VecDeque<String>` | URLs awaiting a fetch slot, in priority order. |
+| `image_urls` | `Vec<String>` | Every distinct image URL of the current load, in on-screen order; drives the `Loading N of M` count. |
+| `spinner_tick` | `usize` | Loading-spinner animation frame, advanced once per UI tick. |
 | `reader_width` | `u16` | Reader inner width from the last draw; sizes pre-fetched art. |
 | `undo_stack` | `Vec<Undone>` | Marked-read entries that can be restored (most recent last). |
 | `notice` | `Option<String>` | Transient footer message (e.g. a write failure); cleared on next key. |
