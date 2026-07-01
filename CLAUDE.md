@@ -17,6 +17,10 @@
   and conventions (CI, package manager, shell, deploy) — the reasoning, not only working code.
 - **Suggest guardrails when a pattern emerges.** If the same kind of command keeps coming up,
   suggest a permission allow-rule or a small wrapper script to remove the repeated prompt.
+- **Interview me about every aspect of a plan until we reach a shared understanding.**  Walk down
+  each branch of the design tree, resolving dependencies between decisions one-by-one. For each
+  question, provide your recommended answer. If a question can be answered by exploring the codebase,
+  explore the codebase instead.
 
 ## Development
 
