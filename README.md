@@ -78,4 +78,5 @@ refresh_interval_secs = 300
 | `A` | Mark the whole loaded window read (asks `y`/`n` first) |
 | `o` | Open in the browser — a podcast enclosure, else a link-blog's external link, else the article URL |
 | `r` | Reload |
+| `?` | Toggle a help overlay listing every keybinding (any key closes it) |
 | `q`/`Esc` | Quit |

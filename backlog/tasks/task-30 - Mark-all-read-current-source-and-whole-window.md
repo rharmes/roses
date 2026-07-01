@@ -1,11 +1,11 @@
 ---
 id: TASK-30
 title: Mark all read (current source and whole window)
-status: In Progress
+status: Done
 assignee:
   - '@ross'
 created_date: '2026-07-01 14:37'
-updated_date: '2026-07-01 21:51'
+updated_date: '2026-07-01 22:16'
 labels:
   - feature
 dependencies: []
@@ -44,3 +44,9 @@ Add a bulk mark-read action. The Feedbin client already batches DELETE /unread_e
 <!-- SECTION:NOTES:BEGIN -->
 Implemented on branch task-30-mark-all-read. Unified single + bulk mark-read into one batch path: Msg::Write/Undone/spawn_write now carry Vec<(Entry,usize)> (single m/u = batch of one). New keys: M = mark selected source's loaded articles read (instant, works from any focus); A = mark whole loaded window read behind a y/n footer confirmation (pending_confirm intercepts the next key). Scope = loaded entries only; pending_ids stay unread and auto-hydrate via near_tail. begin_mark_source_read/begin_mark_window_read share remove_batch (remove back-to-front, restore ascending-index order); reinsert_batch restores a whole batch at original indices so undo reverses a bulk mark in one step. 8 new tests (batch contents, source/window optimistic removal + ordered undo restore, failure rollback, the y/n confirmation gate incl. cancel + empty-window guard); 3 existing single-mark tests updated to the batch shape. 116 tests pass, fmt+clippy clean, suite run 5x — stable. Docs updated in-commit (README shortcuts, architecture keybindings + optimistic-mark section + Action/Confirm, data-model App field + enums).
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Shipped as PR #28 (merged to main as 6149598). Two bulk mark-read actions: M marks every loaded article in the selected source read (instant, any focus); A marks the whole loaded window read behind a y/n footer confirmation. Unified the single + bulk paths into one batch write (Msg::Write/Undone/spawn_write carry Vec<(Entry,usize)>; single m/u = batch of one), so each bulk mark is one batched Feedbin request and one u restores the whole batch in a single step; failed writes roll the whole batch back. Scope = loaded window only (pending_ids stay unread, auto-hydrate via near_tail); order preserved across undo via remove_batch (back-to-front) + reinsert_batch (original indices). 116 tests pass (8 new + 3 migrated), fmt+clippy clean, 5x stable. Docs updated in-commit.
+<!-- SECTION:FINAL_SUMMARY:END -->

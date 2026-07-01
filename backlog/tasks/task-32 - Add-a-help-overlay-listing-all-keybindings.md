@@ -1,10 +1,11 @@
 ---
 id: TASK-32
 title: Add a help overlay listing all keybindings
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@ross'
 created_date: '2026-07-01 14:37'
-updated_date: '2026-07-01 21:44'
+updated_date: '2026-07-01 22:36'
 labels:
   - feature
   - ux
@@ -21,13 +22,15 @@ The footer shows only a subset of keys. Add a ? key that toggles a modal overlay
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Pressing ? opens a help overlay listing all active keybindings; Esc or ? closes it
-- [ ] #2 The overlay does not interfere with background loading or lose selection state
-- [ ] #3 A TestBackend test asserts the overlay renders the expected keys
+- [x] #1 Pressing ? opens a help overlay listing all active keybindings; Esc or ? closes it
+- [x] #2 The overlay does not interfere with background loading or lose selection state
+- [x] #3 A TestBackend test asserts the overlay renders the expected keys
 <!-- AC:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
 Recommended next after TASK-30: the help overlay is the proper home for the growing keybinding set. TASK-30 adds M (mark selected source read) and A (mark whole loaded window read, y/n confirm) — the 1-line footer can only hint at these ('M src · A all'); the overlay should document m/M/A read + u undo and the rest in full.
+
+Implemented on branch task-32-help-overlay. Added a single BINDINGS table (group/keys/desc + optional compact footer form) as the source of truth for BOTH the footer hint and the ? overlay, so they can't drift. ? sets App.show_help; draw() floats draw_help_overlay() — a Clear'd rose-bordered box centered via centered_rect(Flex::Center), grouped headings from help_lines(), sized to content and clamped to area. Modal: while open, handle_key treats ANY key as dismiss (so ?/Esc/q all close; q closes help rather than quitting) and returns Action::None. Pure chrome — reads no mutable state, sets only show_help, so background loads/selection are untouched (AC #2). Per user request, moved the M/A bulk-mark hints OUT of the footer (now flagged overlay-only in BINDINGS) and added a '? help' hint; footer is now: ↑↓ move · ←→ focus · o open · m read · u undo · r reload · ? help · q quit. 5 new tests incl. a TestBackend render assert (AC #3), toggle/any-key-close, Esc/q don't quit, and load-doesn't-disturb-selection (AC #2). 121 tests pass, fmt+clippy clean, 5x stable. Docs updated in-commit (README shortcuts, architecture keybindings+footer diagram+new Help overlay subsection, data-model show_help field). Also created TASK-45 (configurable hex highlight color) per user request.
 <!-- SECTION:NOTES:END -->

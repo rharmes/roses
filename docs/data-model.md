@@ -76,6 +76,7 @@ end (TASK-40) — so every unread entry is reachable without a separate paging e
 | `undo_stack` | `Vec<Undone>` | Marked-read **batches** that can be restored (most recent last); a single `m` is a batch of one (TASK-30). |
 | `notice` | `Option<String>` | Transient footer message (e.g. a write failure); cleared on next key. |
 | `pending_confirm` | `Option<Confirm>` | A pending footer `y`/`n` confirmation; the next key answers it instead of its normal binding (only `A`/`MarkWindowRead` arms it — TASK-30). |
+| `show_help` | `bool` | Whether the `?` keybinding help overlay is open; while set, any key closes it (TASK-32). Pure chrome — doesn't affect loads or selection. |
 | `should_quit` | `bool` | Set by `q`/`Esc`. |
 
 **Why selection-by-id:** mark/undo insert and remove `entries`, which would invalidate stored indices.

@@ -139,7 +139,7 @@ A three-column [Miller-columns] layout over a 1-line footer:
 │ feeds + counts│ titles of the  │ selected      │
 │ (by name)     │ selected source│ article body  │
 └───────────────┴────────────────┴───────────────┘
- ↑↓ move · ←→ focus · m read · M src · A all · u undo · o open · r reload · q quit
+ ↑↓ move · ←→ focus · o open · m read · u undo · r reload · ? help · q quit
 ```
 
 A single **focus cursor** (`Focus::{Sources, Articles, Reader}`) moves between columns. The focused
@@ -201,7 +201,23 @@ too small for the art it degrades to just the centered caption. Loading and `Fai
 | `A` | Mark the **whole loaded window** read, behind a `y`/`n` footer confirmation (TASK-30). |
 | `o` | Open the selected entry in the browser — a podcast enclosure, else a link-blog `external_url`, else the article URL. |
 | `r` | Reload (preserves your place by id — see the selection note above). |
+| `?` | Toggle the keybinding **help overlay** (any key closes it — TASK-32). |
 | `q` / `Esc` | Quit (restores the terminal). |
+
+The footer shows only a compact subset of these; the `?` overlay lists them all. Both are rendered from a
+single `BINDINGS` table (the source of truth, TASK-32): each entry carries its overlay `group`/`keys`/`desc`
+and an optional compact `footer` form, so the two can't drift and a new binding shows up in both by adding
+one row. `M`/`A` are flagged overlay-only (the 1-line footer can't fit everything).
+
+### Help overlay (TASK-32)
+
+`?` sets `App.show_help`; `draw()` then floats `draw_help_overlay()` — a `Clear`ed, rose-bordered box
+centered over the main area (`centered_rect` via `Flex::Center`), listing every binding grouped under bold
+headings (`help_lines()`), sized to its content and clamped to the area. It's **pure chrome**: it reads no
+mutable state and sets no flags beyond `show_help`, so background loads, image pre-fetch, and the selection
+are untouched while it's open (AC #2). It's modal — while open, `handle_key` treats **any** key as a
+dismiss (so `?`/`Esc`/`q` all close it, and `q` closes the overlay rather than quitting) and returns
+`Action::None`.
 
 ### Optimistic mark-read + undo (TASK-7 AC #4, TASK-30)
 
