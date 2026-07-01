@@ -14,9 +14,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use rusqlite::{Connection, Transaction};
+use rusqlite::{Connection, OptionalExtension, Transaction};
 
-use crate::feedbin::Entry;
+use crate::feedbin::{Entry, Validators};
 
 const APP_NAME: &str = "roses";
 const DB_FILE: &str = "roses.db";
@@ -213,6 +213,56 @@ impl Store {
             .context("updating cached read state")?;
         Ok(())
     }
+
+    /// Read the stored HTTP validators for `endpoint` (TASK-42). Missing values
+    /// come back as `None`; a read error degrades to empty (best-effort cache).
+    pub fn get_validators(&self, endpoint: &str) -> Validators {
+        Validators {
+            etag: self.get_meta(&format!("{endpoint}.etag")),
+            last_modified: self.get_meta(&format!("{endpoint}.last_modified")),
+        }
+    }
+
+    /// Persist the HTTP validators for `endpoint` so the next request can send
+    /// them as `If-None-Match` / `If-Modified-Since`.
+    pub fn set_validators(&self, endpoint: &str, v: &Validators) -> Result<()> {
+        self.set_meta(&format!("{endpoint}.etag"), v.etag.as_deref())?;
+        self.set_meta(
+            &format!("{endpoint}.last_modified"),
+            v.last_modified.as_deref(),
+        )?;
+        Ok(())
+    }
+
+    fn get_meta(&self, key: &str) -> Option<String> {
+        self.conn
+            .query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| {
+                r.get::<_, String>(0)
+            })
+            .optional()
+            .ok()
+            .flatten()
+    }
+
+    fn set_meta(&self, key: &str, value: Option<&str>) -> Result<()> {
+        match value {
+            Some(v) => self
+                .conn
+                .execute(
+                    "INSERT INTO meta (key, value) VALUES (?1, ?2)
+                     ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    rusqlite::params![key, v],
+                )
+                .map(|_| ())
+                .context("writing a meta value")?,
+            None => self
+                .conn
+                .execute("DELETE FROM meta WHERE key = ?1", [key])
+                .map(|_| ())
+                .context("clearing a meta value")?,
+        }
+        Ok(())
+    }
 }
 
 /// Upsert entries within a transaction, preserving the existing `starred` flag
@@ -371,5 +421,31 @@ mod tests {
         let s = Store::open_at(&path).unwrap();
         assert_eq!(s.load_unread(50).unwrap().entries.len(), 1, "persisted");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validators_round_trip_in_meta() {
+        let s = mem_store();
+        assert!(
+            s.get_validators("unread").etag.is_none(),
+            "no validators initially"
+        );
+        s.set_validators(
+            "unread",
+            &Validators {
+                etag: Some("\"e1\"".to_string()),
+                last_modified: Some("Sat, 02 Feb 2013 15:20:46 GMT".to_string()),
+            },
+        )
+        .unwrap();
+        let v = s.get_validators("unread");
+        assert_eq!(v.etag.as_deref(), Some("\"e1\""));
+        assert_eq!(
+            v.last_modified.as_deref(),
+            Some("Sat, 02 Feb 2013 15:20:46 GMT")
+        );
+        // Clearing (None) removes them.
+        s.set_validators("unread", &Validators::default()).unwrap();
+        assert!(s.get_validators("unread").etag.is_none());
     }
 }
