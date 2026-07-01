@@ -131,10 +131,11 @@ Serialized (TOML) under the config dir (`$XDG_CONFIG_HOME/roses/config.toml` or 
 `None` fields are omitted by the `toml` serializer.
 
 ```toml
-# email is written by `roses` on login; browser settings are user-edited.
+# email is written by `roses` on login; browser + refresh settings are user-edited.
 email = "reader@example.com"
-browser = "w3m %s"        # command template: %s / {url} placeholder, else URL appended
-browser_terminal = true   # roses suspends/restores the TUI around a terminal browser
+browser = "w3m %s"          # command template: %s / {url} placeholder, else URL appended
+browser_terminal = true     # roses suspends/restores the TUI around a terminal browser
+refresh_interval_secs = 300 # background auto-refresh cadence; omit/0 = off (TASK-37)
 ```
 
 | Field | Type | Notes |
@@ -142,6 +143,7 @@ browser_terminal = true   # roses suspends/restores the TUI around a terminal br
 | `email` | `Option<String>` | The logged-in Feedbin email; also the keychain username. |
 | `browser` | `Option<String>` | Browser command template. |
 | `browser_terminal` | `Option<bool>` | Whether `browser` runs in the terminal (default false). |
+| `refresh_interval_secs` | `Option<u64>` | Background auto-refresh interval in seconds; `None`/`0` disables it (default). Sub-60 s values are clamped up to a 60 s politeness floor (`MIN_REFRESH_SECS`) by `load_refresh_interval()` (TASK-37). |
 
 **No password is ever written here** (a unit test asserts the serialized settings never contain
 "password"). The `config.toml` filename is `.gitignore`d defensively.

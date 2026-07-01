@@ -8,11 +8,18 @@ use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 
 const APP_NAME: &str = "roses";
+
+/// Floor for the auto-refresh interval: sub-minute values clamp up to this so a
+/// misconfigured tiny interval can't hammer Feedbin (TASK-37). Conditional
+/// requests keep an unchanged refresh cheap (a 304), but 60 s is the politeness
+/// floor regardless.
+const MIN_REFRESH_SECS: u64 = 60;
 
 #[derive(Debug, Clone)]
 pub struct Credentials {
@@ -29,6 +36,9 @@ struct Settings {
     browser: Option<String>,
     /// Whether `browser` is a terminal browser (roses suspends the TUI for it).
     browser_terminal: Option<bool>,
+    /// Background auto-refresh interval, in seconds. `0` or unset disables it;
+    /// values below `MIN_REFRESH_SECS` are clamped up (TASK-37).
+    refresh_interval_secs: Option<u64>,
 }
 
 /// The user's browser preference from config. `$BROWSER` and the platform
@@ -149,6 +159,24 @@ pub fn load_credentials() -> Result<Option<Credentials>> {
     Ok(get_password(&email)?.map(|password| Credentials { email, password }))
 }
 
+/// Pure mapping of the configured seconds to an auto-refresh [`Duration`]:
+/// `None`/`0` disables auto-refresh; a positive value is clamped up to
+/// [`MIN_REFRESH_SECS`] so the poll stays polite (TASK-37).
+fn refresh_interval_from(secs: Option<u64>) -> Option<Duration> {
+    match secs {
+        Some(s) if s > 0 => Some(Duration::from_secs(s.max(MIN_REFRESH_SECS))),
+        _ => None,
+    }
+}
+
+/// The background auto-refresh interval from config, or `None` when disabled
+/// (unset or zero). Sub-minute values are clamped up to the politeness floor.
+pub fn load_refresh_interval() -> Result<Option<Duration>> {
+    Ok(refresh_interval_from(
+        load_settings()?.refresh_interval_secs,
+    ))
+}
+
 /// Load the user's browser preference from the config file (empty if unset).
 pub fn load_browser_pref() -> Result<BrowserPref> {
     let settings = load_settings()?;
@@ -219,6 +247,40 @@ mod tests {
     fn empty_settings_have_no_email() {
         let parsed: Settings = toml::from_str("").unwrap();
         assert_eq!(parsed.email, None);
+    }
+
+    #[test]
+    fn refresh_interval_disabled_when_unset_or_zero() {
+        assert_eq!(refresh_interval_from(None), None);
+        assert_eq!(refresh_interval_from(Some(0)), None);
+    }
+
+    #[test]
+    fn refresh_interval_clamps_below_the_floor() {
+        // A too-eager 5 s is bumped up to the 60 s politeness floor.
+        assert_eq!(
+            refresh_interval_from(Some(5)),
+            Some(Duration::from_secs(MIN_REFRESH_SECS))
+        );
+    }
+
+    #[test]
+    fn refresh_interval_honors_values_at_or_above_the_floor() {
+        assert_eq!(
+            refresh_interval_from(Some(300)),
+            Some(Duration::from_secs(300))
+        );
+    }
+
+    #[test]
+    fn refresh_interval_secs_round_trips_through_toml() {
+        let settings = Settings {
+            refresh_interval_secs: Some(600),
+            ..Default::default()
+        };
+        let text = toml::to_string_pretty(&settings).unwrap();
+        let parsed: Settings = toml::from_str(&text).unwrap();
+        assert_eq!(parsed.refresh_interval_secs, Some(600));
     }
 
     #[test]

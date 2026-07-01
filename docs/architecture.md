@@ -52,18 +52,23 @@ is reused unchanged; the UI stays responsive by offloading every network/decode 
 
 - `tui::run` builds a **current-thread** tokio runtime and keeps a `Handle`. (Features: `tokio = {rt, sync}`.)
 - Before the loop, `run_loop` opens the **offline cache** (`store::Store`) and seeds `App` from it for an
-  instant first paint (TASK-41); the background fetch already spawned by `run` reconciles it.
+  instant first paint (TASK-41), then spawns the first background fetch to reconcile it.
 - The UI runs a **synchronous immediate-mode loop** (`run_loop`), not an async task. Each iteration:
   1. Drain the `mpsc::UnboundedReceiver<Msg>` (`rx.try_recv()`); for each `Msg`, `persist_msg` writes the
      result through to the cache (main-thread store writes), then it's applied to `App` (decrementing the
-     in-flight image counter on `Msg::Image`).
+     in-flight image counter on `Msg::Image`; clearing the auto-refresh in-flight guard on a completed
+     fetch — `Msg::Loaded`/`Msg::NotModified`).
   2. `terminal.draw(|f| app.draw(f))` — redraw the whole UI from `App` state.
   3. If the selected article changed, `app.prioritize_selected_images()` (bump its queued images).
   4. Drain the image pre-fetch queue up to `MAX_IMAGE_FETCHES` (6) concurrent.
   5. If the selection nears the oldest loaded entry and un-hydrated unread ids remain,
      `maybe_begin_load_more()` drains the next batch and `spawn_load_more` hydrates it (TASK-40).
-  6. `event::poll(TICK)` (100 ms) for input; on a key press, `app.handle_key()` returns an `Action`
-     the loop executes (spawning background work).
+  6. **Auto-refresh (TASK-37):** if a `refresh_interval` is configured and the pure
+     `should_auto_refresh(interval, last_fetch.elapsed(), in_flight)` predicate is true, spawn a *silent*
+     background `spawn_fetch` (no `Status::Loading`) and reset the timer + in-flight guard. Replaying the
+     stored validators means an unchanged unread set 304s to a no-op, so the common tick is invisible.
+  7. `event::poll(TICK)` (100 ms) for input; on a key press, `app.handle_key()` returns an `Action`
+     the loop executes (spawning background work). A manual `Reload` also resets the auto-refresh timer.
 - Background work runs via `handle.spawn_blocking(...)`, which executes the **blocking** client/decoder
   on a pool thread and `tx.send(Msg::…)`s the result. The closures own `Client` clones (cheap — the
   inner `reqwest::blocking::Client` is `Arc`-backed) and a `tx` clone.
@@ -141,7 +146,10 @@ when focus is `Articles` or `Reader` — a focused *source* shows an empty reade
 
 **Selection is tracked by id** (`selected_source: feed_id`, `selected_article: entry id`), not by index,
 so it survives entries being added/removed by mark/undo. `ListState` indices are derived per-frame from
-those ids. Display order: **sources by feed name**; **articles oldest-first** (`articles()` reverses the
+those ids. A reload or background auto-refresh is likewise **non-disruptive** (`preserve_or_reselect` on
+`Msg::Loaded`, TASK-37): when the selected source and article still exist it keeps the cursor, focus, and
+reader scroll untouched; only if the selected article vanished does it fall back to that source's first
+article (or a full reselect if the source itself is gone). Display order: **sources by feed name**; **articles oldest-first** (`articles()` reverses the
 newest-first `entries`).
 
 All three panes share `column_block()`, which adds a `Padding::horizontal(1)` inset (TASK-12) so content
@@ -187,7 +195,7 @@ too small for the art it degrades to just the centered caption. Loading and `Fai
 | `PgUp`/`PgDn` | Page the reader (only when the reader is focused). |
 | `m` / `u` | Mark the selected article read / undo the last mark. |
 | `o` | Open the selected entry in the browser — a podcast enclosure, else a link-blog `external_url`, else the article URL. |
-| `r` | Reload. |
+| `r` | Reload (preserves your place by id — see the selection note above). |
 | `q` / `Esc` | Quit (restores the terminal). |
 
 ### Optimistic mark-read + undo (TASK-7, AC #4)
@@ -201,7 +209,9 @@ Writes update the UI immediately and roll back on failure so client and server s
 - `begin_undo()` pops `undo_stack`, re-inserts the entry optimistically, returns it for `mark_unread`.
   - `Msg::Write{Undo, Err}` → remove again, re-push to `undo_stack` (retryable) + notice.
 
-A fresh `Msg::Loaded` clears the undo stack.
+A `Msg::Loaded` **preserves** the undo stack across a reload or auto-refresh (a silent background refresh
+must not wipe a recent mark-read's undo — TASK-37); it drops only the entries the fresh set re-added, so a
+later undo can't duplicate a now-present row.
 
 ### Reader content pipeline
 
@@ -290,7 +300,9 @@ redraw.
 ## Config & credentials (`config.rs`)
 
 - Config dir: `$XDG_CONFIG_HOME/roses` if set & non-empty, else `~/.config/roses` (honored on macOS too).
-- `config.toml` holds non-secret `Settings`: `email`, `browser`, `browser_terminal`. (`.gitignore`s
+- `config.toml` holds non-secret `Settings`: `email`, `browser`, `browser_terminal`, and
+  `refresh_interval_secs` (auto-refresh cadence; `load_refresh_interval()` maps it to an `Option<Duration>`,
+  disabling on unset/zero and clamping sub-60 s up to a politeness floor — TASK-37). (`.gitignore`s
   `config.toml` defensively.)
 - The **password lives only in the OS keychain** (`keyring`, service `"roses"`, username = email). The
   backend is **cfg-gated per platform**: macOS uses the native Keychain (`apple-native-keyring-store`),

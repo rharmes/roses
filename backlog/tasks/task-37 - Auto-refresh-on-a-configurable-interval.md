@@ -1,9 +1,11 @@
 ---
 id: TASK-37
 title: Auto-refresh on a configurable interval
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@ross'
 created_date: '2026-07-01 14:38'
+updated_date: '2026-07-01 19:41'
 labels:
   - feature
 dependencies: []
@@ -19,7 +21,23 @@ Add optional background auto-refresh: re-run the load on a configurable interval
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A config setting controls the refresh interval and disables it when unset or zero
-- [ ] #2 Auto-refresh reloads in the background and preserves selection where possible
-- [ ] #3 The setting is documented in docs/data-model.md (Settings) and README
+- [x] #1 A config setting controls the refresh interval and disables it when unset or zero
+- [x] #2 Auto-refresh reloads in the background and preserves selection where possible
+- [x] #3 The setting is documented in docs/data-model.md (Settings) and README
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. config: add refresh_interval_secs setting + pure refresh_interval_from() (None/0 = off, clamp sub-60s up to MIN_REFRESH_SECS=60) + load_refresh_interval().
+2. tui: unify manual reload + auto-refresh into one gentle Msg::Loaded apply path — preserve_or_reselect() keeps focus/selection/scroll by id (reselect only if the selected article/source vanished); preserve the undo stack, pruning only re-added entries.
+3. tui run_loop: track last_fetch:Instant + fetch_in_flight guard; pure should_auto_refresh(interval, elapsed, in_flight) predicate fires a SILENT background spawn_fetch (no Status::Loading) each interval; manual Reload resets the timer. 304 (unchanged) is a no-op.
+4. Tests: config mapping + toml round-trip; should_auto_refresh predicate; reload preserves selection/scroll; reselects when article vanished; preserves undo but prunes re-added. All deterministic (no timing/sleeps).
+5. Docs (same commit): README + data-model Settings; architecture run-loop step, undo-stack + selection notes, config list; persistence 'spawned by run' -> run_loop accuracy fix.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Implemented as a unified gentle Msg::Loaded apply path (no new Msg variant): manual reload and background auto-refresh both preserve selection/scroll/undo by id; auto-refresh is silent (no Status::Loading) and 304s to a no-op when unchanged. Config refresh_interval_secs (seconds, 60s floor, off by default). Per interview: seconds+60s floor, footer notice on failure, preserve undo, and manual reload also made gentle. 108 tests pass (fmt+clippy clean); ran the suite 5x for flakiness — stable.
+<!-- SECTION:NOTES:END -->
