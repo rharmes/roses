@@ -12,6 +12,7 @@ mod browser;
 mod config;
 mod feedbin;
 mod images;
+mod store;
 mod text;
 mod theme;
 mod tui;
@@ -44,8 +45,12 @@ fn main() -> Result<()> {
     }
 }
 
-/// Load stored credentials (or prompt for them on first run) and return an
-/// authenticated Feedbin client.
+/// Load stored credentials (or prompt for them on first run) and return a
+/// Feedbin client. The credentials are **not** validated here: the TUI paints
+/// from its offline cache first and reconciles in the background (TASK-41), so a
+/// bad-password 401 or an offline box surfaces as an in-app notice rather than
+/// blocking startup. (`roses list` still hits the network immediately, so it
+/// reports auth errors on its first request.)
 fn connect() -> Result<Client> {
     let credentials = match config::load_credentials()? {
         Some(creds) => creds,
@@ -56,9 +61,7 @@ fn connect() -> Result<Client> {
             creds
         }
     };
-    let client = Client::new(&credentials)?;
-    client.authenticate()?;
-    Ok(client)
+    Client::new(&credentials)
 }
 
 /// Launch the full-screen ratatui interface (TASK-6).

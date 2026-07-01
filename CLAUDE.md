@@ -48,7 +48,9 @@ Source layout under `src/`: `main` (CLI dispatch), `config` (settings +
 keychain credentials), `feedbin` (Feedbin API client), `ui` (plain-stdout
 list — `roses list`), `tui` (full-screen ratatui app — the default `roses`),
 `browser` (open article URLs), `images` (half-block image rendering),
-`theme` (the rose color palette + gradient `lerp`).
+`store` (SQLite offline cache — see `docs/persistence.md`), `text`
+(control-char stripping for feed-derived display fields), `theme` (the rose
+color palette + gradient `lerp`).
 
 Architecture and data model are documented in @docs/architecture.md and
 @docs/data-model.md (imported into context) — keep them current in the *same
