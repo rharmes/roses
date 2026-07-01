@@ -8,6 +8,7 @@
 //! API shape: `docs/tui_research.md` §4.1.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use reqwest::Method;
@@ -27,6 +28,13 @@ const MAX_IDS_PER_REQUEST: usize = 100;
 const MAX_UNREAD_IDS_PER_REQUEST: usize = 1000;
 
 const USER_AGENT: &str = concat!("roses/", env!("CARGO_PKG_VERSION"));
+
+/// Fail fast if a TCP connection to Feedbin can't be established.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Overall per-request ceiling. Without it a hung or half-open connection would
+/// block a `spawn_blocking` pool thread indefinitely, and repeated reloads would
+/// leak more stuck threads (the image client already caps its fetches at 10s).
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A hydrated Feedbin entry. Feedbin sends `title`, `url`, `author`,
 /// `published`, `summary`, and `content` as nullable, so they are `Option` to
@@ -134,8 +142,21 @@ impl Client {
     /// Build a client pointed at an arbitrary base URL. Used by tests to target
     /// a local mock server instead of the live API.
     fn with_base_url(credentials: &Credentials, base_url: &str) -> Result<Self> {
+        Self::with_base_url_and_timeout(credentials, base_url, REQUEST_TIMEOUT)
+    }
+
+    /// Like [`Client::with_base_url`] but with an explicit overall request
+    /// timeout, so a test can force a fast timeout against a non-responding
+    /// socket rather than waiting out the production ceiling.
+    fn with_base_url_and_timeout(
+        credentials: &Credentials,
+        base_url: &str,
+        request_timeout: Duration,
+    ) -> Result<Self> {
         let http = reqwest::blocking::Client::builder()
             .user_agent(USER_AGENT)
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(request_timeout)
             .build()
             .context("building the HTTP client")?;
         Ok(Self {
@@ -506,5 +527,50 @@ mod tests {
         let client = test_client(&server);
         assert!(client.mark_read(&[]).unwrap().is_empty());
         m.assert();
+    }
+
+    #[test]
+    fn request_times_out_instead_of_hanging() {
+        use std::net::TcpListener;
+
+        // A server that accepts the connection but never sends a response,
+        // holding the socket open past the client's short timeout — so the
+        // client times out rather than observing a closed connection. (mockito
+        // has no response-delay API, hence the raw listener.)
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _server = std::thread::spawn(move || {
+            if let Ok((_stream, _)) = listener.accept() {
+                std::thread::sleep(Duration::from_millis(1000));
+            }
+        });
+
+        let credentials = Credentials {
+            email: "reader@example.com".to_string(),
+            password: "swordfish".to_string(),
+        };
+        let client = Client::with_base_url_and_timeout(
+            &credentials,
+            &format!("http://{addr}/v2"),
+            Duration::from_millis(250),
+        )
+        .unwrap();
+
+        let start = std::time::Instant::now();
+        let err = client.authenticate().unwrap_err();
+        let elapsed = start.elapsed();
+        let chain = format!("{err:#}");
+
+        // The 250ms timeout must fire well before the server closes at 1s (and
+        // far below the 30s production ceiling), proving the timeout is applied
+        // rather than the request hanging.
+        assert!(
+            elapsed < Duration::from_millis(750),
+            "request should time out promptly, took {elapsed:?}"
+        );
+        assert!(
+            chain.to_lowercase().contains("time"),
+            "error should indicate a timeout: {chain}"
+        );
     }
 }
