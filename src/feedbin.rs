@@ -31,7 +31,9 @@ const USER_AGENT: &str = concat!("roses/", env!("CARGO_PKG_VERSION"));
 /// A hydrated Feedbin entry. Feedbin sends `title`, `url`, `author`,
 /// `published`, `summary`, and `content` as nullable, so they are `Option` to
 /// avoid panicking on real-world data (AC #5). `content` is HTML; the reader
-/// pane renders it to text. Remaining fields beyond these are ignored by serde.
+/// pane renders it to text. The `images`/`enclosure`/`json_feed` objects are
+/// only present with `mode=extended` (TASK-21/22/23). Remaining fields are
+/// ignored by serde.
 #[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)] // `id` feeds the read/unread sync in TASK-7
 pub struct Entry {
@@ -47,6 +49,61 @@ pub struct Entry {
     pub summary: Option<String>,
     /// Full entry body as HTML (rendered to text by the reader pane).
     pub content: Option<String>,
+    /// Feedbin's extracted lead image (`mode=extended`, TASK-21). Boxed so these
+    /// optional extended-mode objects don't bloat `Entry` (which travels through
+    /// the message channel, the entries Vec, and the undo stack).
+    pub images: Option<Box<EntryImages>>,
+    /// Podcast/media enclosure (`mode=extended`, TASK-22).
+    pub enclosure: Option<Box<Enclosure>>,
+    /// JSON Feed extras — notably `external_url` for link blogs
+    /// (`mode=extended`, TASK-23).
+    pub json_feed: Option<Box<JsonFeed>>,
+}
+
+/// The `images` object (extended mode): a curated lead image. Only the CDN URL
+/// of the standard size (`size_1`) is used; the raw pixel dimensions Feedbin
+/// also provides aren't needed because the half-block renderer decodes the CDN
+/// image and sizes the art from its actual pixels.
+#[derive(Debug, Clone, Deserialize)]
+pub struct EntryImages {
+    pub size_1: Option<ImageSize>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ImageSize {
+    pub cdn_url: Option<String>,
+}
+
+/// The `enclosure` object (extended mode): a podcast/media attachment.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Enclosure {
+    pub enclosure_url: Option<String>,
+    pub enclosure_type: Option<String>,
+    pub itunes_duration: Option<String>,
+}
+
+/// The `json_feed` object (extended mode); `external_url` is the link a
+/// link-blog entry points *out* to (distinct from the permalink `url`).
+#[derive(Debug, Clone, Deserialize)]
+pub struct JsonFeed {
+    pub external_url: Option<String>,
+}
+
+impl Entry {
+    /// Feedbin's extracted lead-image CDN URL, if any (TASK-21).
+    pub fn lead_image_url(&self) -> Option<&str> {
+        self.images.as_ref()?.size_1.as_ref()?.cdn_url.as_deref()
+    }
+
+    /// The podcast/media enclosure URL, if any (TASK-22).
+    pub fn enclosure_url(&self) -> Option<&str> {
+        self.enclosure.as_ref()?.enclosure_url.as_deref()
+    }
+
+    /// The JSON Feed `external_url` (link-blog target), if any (TASK-23).
+    pub fn external_url(&self) -> Option<&str> {
+        self.json_feed.as_ref()?.external_url.as_deref()
+    }
 }
 
 /// One Feedbin subscription. Used only to map a `feed_id` to its display title;
@@ -134,7 +191,9 @@ impl Client {
                 .join(",");
             let resp = self
                 .get("entries.json")
-                .query(&[("ids", csv.as_str())])
+                // `mode=extended` adds the images/enclosure/json_feed objects
+                // used by the reader (TASK-21/22/23).
+                .query(&[("ids", csv.as_str()), ("mode", "extended")])
                 .send()
                 .context("requesting entries from Feedbin")?;
             let batch = check_status(resp)?
@@ -310,6 +369,40 @@ mod tests {
         assert_eq!(entries[1].url, None);
         assert_eq!(entries[1].author, None);
         assert_eq!(entries[1].published, None);
+    }
+
+    #[test]
+    fn entries_request_uses_extended_mode_and_parses_extended_objects() {
+        let mut server = mockito::Server::new();
+        let body = r#"[
+            {"id": 1, "feed_id": 7, "title": "Ep",
+             "images": {"size_1": {"cdn_url": "https://cdn/lead.jpg"}},
+             "enclosure": {"enclosure_url": "https://cdn/ep.mp3", "enclosure_type": "audio/mpeg", "itunes_duration": "2823"},
+             "json_feed": {"external_url": "https://example.com/linked"}},
+            {"id": 2, "feed_id": 7, "title": "Plain"}
+        ]"#;
+        server
+            .mock("GET", "/v2/entries.json")
+            // Assert both the ids and mode=extended are sent.
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("ids".into(), "1,2".into()),
+                mockito::Matcher::UrlEncoded("mode".into(), "extended".into()),
+            ]))
+            .with_status(200)
+            .with_body(body)
+            .create();
+        let client = test_client(&server);
+        let entries = client.entries(&[1, 2]).unwrap();
+        assert_eq!(entries[0].lead_image_url(), Some("https://cdn/lead.jpg"));
+        assert_eq!(entries[0].enclosure_url(), Some("https://cdn/ep.mp3"));
+        assert_eq!(
+            entries[0].external_url(),
+            Some("https://example.com/linked")
+        );
+        // Absent extended objects on a plain entry degrade to None.
+        assert_eq!(entries[1].lead_image_url(), None);
+        assert_eq!(entries[1].enclosure_url(), None);
+        assert_eq!(entries[1].external_url(), None);
     }
 
     #[test]

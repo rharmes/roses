@@ -85,7 +85,7 @@ tests point at a mockito server.
 | --- | --- | --- |
 | `authenticate()` | `GET /authentication.json` | 200 ⇒ ok; 401 ⇒ clear error. |
 | `unread_entry_ids()` | `GET /unread_entries.json` | `Vec<i64>` — source of truth for unread state. |
-| `entries(&[i64])` | `GET /entries.json?ids=…` | Hydrate `Entry`s, batched at 100 ids/request. |
+| `entries(&[i64])` | `GET /entries.json?ids=…&mode=extended` | Hydrate `Entry`s, batched at 100 ids/request; `mode=extended` adds the images/enclosure/json_feed objects. |
 | `feed_titles()` | `GET /subscriptions.json` | `HashMap<feed_id, title>` (null titles dropped). |
 | `mark_read(&[i64])` | `DELETE /unread_entries.json` | JSON body, batched at 1000; returns changed ids. |
 | `mark_unread(&[i64])` | `POST /unread_entries.json` | The undo for `mark_read`. |
@@ -166,7 +166,7 @@ too small for the art it degrades to just the centered caption. Loading and `Fai
 | `g`/`Home`, `G`/`End` | First / last in the focused column (or top/bottom of the reader). |
 | `PgUp`/`PgDn` | Page the reader (only when the reader is focused). |
 | `m` / `u` | Mark the selected article read / undo the last mark. |
-| `o` | Open the selected article's URL in the browser. |
+| `o` | Open the selected entry in the browser — a podcast enclosure, else a link-blog `external_url`, else the article URL. |
 | `r` | Reload. |
 | `q` / `Esc` | Quit (restores the terminal). |
 
@@ -195,7 +195,19 @@ terminal later narrows, that stale art would be wider than the reader's `Wrap` w
 row + a short fragment — the "half-height rows" artifact. So `reader_text` **clips each art line to
 `max_width`** (the reader's current inner width, passed from `draw_reader`) via `clip_line_to_width`: a
 no-op when the art already fits, a graceful right-crop when it doesn't (until a reload re-renders it at
-the new width). Text lines are *not* clipped — they still wrap.
+the new width). Text lines are *not* clipped — they still wrap. Both inline images and the extended-mode
+lead image go through the shared `push_image()` helper.
+
+**Extended-mode header & links (TASK-21/22/23, `mode=extended`).** When the entry has an `enclosure`, the
+header adds a dim `Audio · 47:03` line (`podcast_indicator()` — media kind + `format_duration()`, which
+turns bare seconds into `H:MM:SS`/`M:SS`). The link line prefers a link-blog's `json_feed.external_url`
+(underlined, the target `o` opens) and keeps the permalink on a dim `permalink: <url>` line so it stays
+visible (TASK-23); otherwise it's just the `url`. A **lead image** (`images.size_1.cdn_url`) renders as a
+hero at the top of the body **only when the body has no inline `<img>`** — so image-rich articles are
+unchanged and metadata-only feeds still get a picture (TASK-21); `article_image_urls()` applies the same
+rule so the pre-fetch and the "N of M" count stay in sync. The `o` open target has precedence
+**enclosure → external_url → url** (`selected_url()`), so `o` plays a podcast, follows a link-blog out, or
+opens the permalink.
 
 The meta line **omits the feed/blog name** — it's already the highlighted source in the left column, so
 the header shows the entry's `author` instead when Feedbin provides one (TASK-18). The raw ISO-8601
