@@ -14,7 +14,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Local};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::layout::{Alignment, Constraint, Flex, Layout, Margin, Rect};
-use ratatui::style::{Style, Stylize};
+use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
     Block, Clear, List, ListItem, ListState, Padding, Paragraph, Scrollbar, ScrollbarOrientation,
@@ -960,14 +960,28 @@ impl App {
         }
     }
 
+    /// The accent color for focused chrome + the selection bar: the rose accent
+    /// normally, muted to grey while the help overlay is open so the overlay
+    /// draws the eye (TASK-46). Purely a display choice — focus/selection state
+    /// is untouched, and the overlay/footer/reader-title keep their own rose.
+    fn accent(&self) -> Color {
+        if self.show_help {
+            theme::MUTED
+        } else {
+            theme::ROSE
+        }
+    }
+
     fn column_block(&self, title: &'static str, focused: bool) -> Block<'static> {
-        // The focused pane lights up in rose (border + title); unfocused panes stay
-        // neutral (dim border, plain title) so only the active column draws the eye
-        // (TASK-14, chrome-only accent).
+        // The focused pane lights up in the accent (border + title); unfocused panes
+        // stay neutral (dim border, plain title) so only the active column draws the
+        // eye (TASK-14, chrome-only accent). The accent mutes to grey under the help
+        // overlay (TASK-46).
         let (border, title_line) = if focused {
+            let accent = self.accent();
             (
-                Style::new().fg(theme::ROSE).bold(),
-                Line::from(Span::styled(title, Style::new().fg(theme::ROSE).bold())),
+                Style::new().fg(accent).bold(),
+                Line::from(Span::styled(title, Style::new().fg(accent).bold())),
             )
         } else {
             (Style::new().dim(), Line::from(title))
@@ -989,7 +1003,7 @@ impl App {
     /// (TASK-14) while keeping the `REVERSED` modifier.
     fn highlight(&self, focused: bool) -> Style {
         if focused {
-            Style::new().fg(theme::ROSE).reversed()
+            Style::new().fg(self.accent()).reversed()
         } else {
             Style::new().bold()
         }
@@ -3964,6 +3978,79 @@ mod tests {
         );
         // The reader title is rose.
         assert_eq!(cell(74, 1).fg, theme::ROSE, "reader title is rose");
+    }
+
+    #[test]
+    fn help_overlay_mutes_focus_and_selection_accent_and_restores_it() {
+        // TASK-46: while the overlay is open the focused column's border and the
+        // selection bar recede to grey; the overlay's own title stays rose; and
+        // closing it restores the rose accent with no lingering grey.
+        use ratatui::style::Modifier;
+        let mut app = app_with(&[(9, "Hacker News", 2)]);
+        app.focus_right(); // focus Articles (x∈[30,72))
+        // Tall enough that the centered overlay never covers rows 0–1 (the focused
+        // border row and the first selection row we probe).
+        let backend = ratatui::backend::TestBackend::new(120, 30);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        // Closed: focused border + selection are rose.
+        terminal.draw(|f| app.draw(f)).unwrap();
+        {
+            let b = terminal.backend().buffer();
+            assert_eq!(
+                b.cell((50, 0)).unwrap().fg,
+                theme::ROSE,
+                "border rose (closed)"
+            );
+            assert_eq!(
+                b.cell((32, 1)).unwrap().fg,
+                theme::ROSE,
+                "selection rose (closed)"
+            );
+        }
+
+        // Open: they mute to grey; the overlay itself stays rose.
+        app.show_help = true;
+        terminal.draw(|f| app.draw(f)).unwrap();
+        {
+            let b = terminal.backend().buffer();
+            assert_eq!(
+                b.cell((50, 0)).unwrap().fg,
+                theme::MUTED,
+                "focused border greyed under the overlay"
+            );
+            let sel = b.cell((32, 1)).unwrap();
+            assert_eq!(sel.fg, theme::MUTED, "selection greyed under the overlay");
+            assert!(
+                sel.modifier.contains(Modifier::REVERSED),
+                "selection stays reversed even when muted"
+            );
+            // The overlay's own title stays rose (the only 'K' on screen).
+            let overlay_rose = (0..30u16).any(|y| {
+                (0..120u16).any(|x| {
+                    let c = b.cell((x, y)).unwrap();
+                    c.symbol() == "K" && c.fg == theme::ROSE
+                })
+            });
+            assert!(overlay_rose, "the overlay title stays rose");
+        }
+
+        // Closed again: rose restored, no lingering grey.
+        app.show_help = false;
+        terminal.draw(|f| app.draw(f)).unwrap();
+        {
+            let b = terminal.backend().buffer();
+            assert_eq!(
+                b.cell((50, 0)).unwrap().fg,
+                theme::ROSE,
+                "border rose again after close"
+            );
+            assert_eq!(
+                b.cell((32, 1)).unwrap().fg,
+                theme::ROSE,
+                "selection rose again after close"
+            );
+        }
     }
 
     #[test]

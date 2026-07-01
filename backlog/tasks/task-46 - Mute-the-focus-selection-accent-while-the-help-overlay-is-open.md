@@ -1,9 +1,11 @@
 ---
 id: TASK-46
 title: Mute the focus/selection accent while the help overlay is open
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@ross'
 created_date: '2026-07-01 22:42'
+updated_date: '2026-07-01 22:52'
 labels:
   - feature
   - ux
@@ -21,8 +23,14 @@ When the ? help overlay (TASK-32) is open, the three-column UI behind it still d
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 While the help overlay is open, the focused column's border + title and the selected-item highlight render in grey, not the rose accent
-- [ ] #2 Closing the overlay restores the normal rose accent immediately, with no lingering grey
-- [ ] #3 The overlay's own border/title stay rose (only the background chrome is muted); selection/focus state is unchanged
-- [ ] #4 A TestBackend test asserts the focus/selection accent is grey while the overlay is open and rose after it closes
+- [x] #1 While the help overlay is open, the focused column's border + title and the selected-item highlight render in grey, not the rose accent
+- [x] #2 Closing the overlay restores the normal rose accent immediately, with no lingering grey
+- [x] #3 The overlay's own border/title stay rose (only the background chrome is muted); selection/focus state is unchanged
+- [x] #4 A TestBackend test asserts the focus/selection accent is grey while the overlay is open and rose after it closes
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Implemented on branch task-46-mute-accent-under-help. Added theme::MUTED (grey Rgb 0x808080) and App::accent() -> Color returning MUTED when show_help else ROSE; column_block (focused border/title) and highlight (selection bar) now resolve their color via self.accent(). Display-only — focus/selection state untouched. Scoped to those two per AC #1; the overlay's own border/title (draw_help_overlay uses theme::ROSE directly), the footer keys, and the reader title stay rose. Reader title deliberately excluded: it lives in the memoized reader_text, so muting it would require keying the reader cache on show_help — out of scope. New TestBackend test asserts border+selection are rose (closed) -> grey + reversed (open, overlay title still rose) -> rose again (closed). 122 tests pass, fmt+clippy clean, 5x stable. Docs: architecture Help-overlay subsection notes the muting + scope.
+<!-- SECTION:NOTES:END -->
