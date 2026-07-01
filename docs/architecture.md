@@ -233,6 +233,14 @@ the front on a selection change, so an explicit jump pulls them forward while se
 top-to-bottom. `images::render()` maps a decoded image to `▀` `Line`s (fg = top pixel, bg = bottom
 pixel; run-length-coalesced; aspect-corrected; ≤80×40 cells).
 
+**Loading indicator (TASK-19).** `refill_image_queue` also records every distinct image URL of the load
+in `image_urls`; `image_progress()` counts how many have resolved (`Ready`/`Failed`) versus the total, or
+`None` when there are no images or all are done. While some remain, `draw()` shows a right-aligned footer
+indicator — a braille spinner + `Loading N of M images` (`loading_indicator()`, a pure function so tests
+freeze the frame) — reserving its columns via a `Layout` split so it never overlaps the help. The spinner
+frame (`spinner_tick`) is advanced once per `run_loop` iteration, which ticks ~every 100 ms regardless of
+input, so it animates on its own.
+
 > **Approach note:** images render *into the reader text* as half-block `Line`s rather than via the
 > `ratatui-image` widget, so they flow inline within the single scrolling reader `Paragraph`. This is a
 > deliberate, approved deviation from the research doc's "prefer ratatui-image".
