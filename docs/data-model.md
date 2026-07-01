@@ -20,9 +20,18 @@ real-world data.
 | `published` | `Option<String>` | ISO-8601 string. Sorted on as a raw string compare (= chronological); also humanized to local time for the reader header via `format_published()` (TASK-17). |
 | `summary` | `Option<String>` | Short text; reader body fallback when `content` is absent. |
 | `content` | `Option<String>` | Full body **as HTML**; the reader renders it to text + half-block images. |
+| `images` | `Option<Box<EntryImages>>` | Extended-mode lead image (`size_1.cdn_url`); shown as a hero when the body has no inline `<img>` (TASK-21). |
+| `enclosure` | `Option<Box<Enclosure>>` | Extended-mode podcast/media (`enclosure_url` + type + `itunes_duration`); reader shows a "kind · duration" line and `o` opens it (TASK-22). |
+| `json_feed` | `Option<Box<JsonFeed>>` | Extended-mode JSON Feed extras; `external_url` is the link-blog target `o` opens (TASK-23). |
 
 `Deserialize` ignores unknown JSON fields. Derived `Clone` (entries are cloned into background tasks and
 the undo stack). `#[allow(dead_code)]` on the struct (`id` is read by the read/undo sync but not every code path).
+The three extended-mode objects (`images`/`enclosure`/`json_feed`) are only present with `mode=extended`
+and are **boxed** so they don't bloat `Entry` (which travels through the message channel, the entries Vec,
+and the undo stack). Accessors `lead_image_url()`, `enclosure_url()`, `external_url()` dig through the
+nested `Option`s. `EntryImages { size_1: Option<ImageSize{ cdn_url }> }`,
+`Enclosure { enclosure_url, enclosure_type, itunes_duration }`, `JsonFeed { external_url }` — all fields
+`Option`, tolerant of absence.
 
 ### `feedbin::Subscription` (private)
 
@@ -145,7 +154,7 @@ password) on every request** — no tokens. Full spec: <https://github.com/feedb
 | --- | --- | --- |
 | `GET /authentication.json` | validate login | 200 valid / 401 invalid. |
 | `GET /unread_entries.json` | unread ids | → `[i64, …]` (source of truth). |
-| `GET /entries.json?ids=…` | hydrate entries | ≤100 ids/request; → `[Entry-shaped objects]`. |
+| `GET /entries.json?ids=…&mode=extended` | hydrate entries | ≤100 ids/request; `mode=extended` adds `images`/`enclosure`/`json_feed`; → `[Entry-shaped objects]`. |
 | `GET /subscriptions.json` | feed names | → objects with `feed_id` + `title`. |
 | `DELETE /unread_entries.json` | mark read | body `{"unread_entries":[…]}`, ≤1000 ids; → changed ids. |
 | `POST /unread_entries.json` | mark unread (undo) | same shape as DELETE. |

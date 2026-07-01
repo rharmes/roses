@@ -67,6 +67,6 @@ browser_terminal = true
 | `g`/`Home`, `G`/`End` | First / last item (or top / bottom of the reader) |
 | `PgUp`/`PgDn` | Page the reader |
 | `m` / `u` | Mark the selected article read / undo the last mark |
-| `o` | Open the selected article in the browser |
+| `o` | Open in the browser — a podcast enclosure, else a link-blog's external link, else the article URL |
 | `r` | Reload |
 | `q`/`Esc` | Quit |

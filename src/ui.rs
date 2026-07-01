@@ -69,6 +69,9 @@ mod tests {
             published: None,
             summary: None,
             content: None,
+            images: None,
+            enclosure: None,
+            json_feed: None,
         }
     }
 

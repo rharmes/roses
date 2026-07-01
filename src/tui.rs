@@ -27,7 +27,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::browser;
 use crate::config::BrowserPref;
-use crate::feedbin::{Client, Entry};
+use crate::feedbin::{Client, Enclosure, Entry};
 use crate::theme;
 
 /// How many of the newest unread entries to load.
@@ -217,8 +217,15 @@ impl App {
     }
 
     /// The URL of the selected article, if any (for opening in a browser).
+    /// The URL that `o` opens for the selected entry. Precedence: a podcast
+    /// enclosure (TASK-22) → a link-blog `external_url` (TASK-23) → the permalink.
     fn selected_url(&self) -> Option<String> {
-        self.selected_article_entry().and_then(|e| e.url.clone())
+        self.selected_article_entry().and_then(|e| {
+            e.enclosure_url()
+                .or_else(|| e.external_url())
+                .map(str::to_string)
+                .or_else(|| e.url.clone())
+        })
     }
 
     /// Image URLs in one article's body, in document order.
@@ -228,13 +235,22 @@ impl App {
             .as_deref()
             .or(entry.summary.as_deref())
             .unwrap_or("");
-        content_blocks(body)
+        let inline: Vec<String> = content_blocks(body)
             .into_iter()
             .filter_map(|block| match block {
                 Segment::Image(url) => Some(url),
                 Segment::Text(_) => None,
             })
-            .collect()
+            .collect();
+        // Fall back to the extended-mode lead image only when the body has no
+        // inline image — matching the reader, which shows the lead image only
+        // then (TASK-21), so the pre-fetch and the "N of M" count stay in sync.
+        if inline.is_empty()
+            && let Some(url) = entry.lead_image_url()
+        {
+            return vec![url.to_string()];
+        }
+        inline
     }
 
     /// Enqueue every not-yet-seen image for background pre-fetch in on-screen
@@ -1024,7 +1040,65 @@ fn clip_line_to_width(line: &Line<'static>, max_width: u16) -> Line<'static> {
     Line::from(spans)
 }
 
-/// Build the reader pane's content for one entry: a title / author·date / url
+/// Render one image URL into the reader lines: its cached half-block art
+/// (clipped to `max_width`), or a loading / unavailable placeholder. Shared by
+/// inline body images and the extended-mode lead image (TASK-21).
+fn push_image(
+    lines: &mut Vec<Line<'static>>,
+    url: &str,
+    images: &HashMap<String, ImageState>,
+    max_width: u16,
+) {
+    match images.get(url) {
+        Some(ImageState::Ready(art)) => {
+            lines.push(Line::from(""));
+            lines.extend(art.iter().map(|line| clip_line_to_width(line, max_width)));
+            lines.push(Line::from(""));
+        }
+        Some(ImageState::Failed) => {
+            lines.push(Line::from(format!("[image unavailable: {url}]")).dim());
+        }
+        _ => lines.push(Line::from(format!("[image loading… {url}]")).dim()),
+    }
+}
+
+/// A short podcast/media indicator for the reader header (TASK-22), e.g.
+/// "Audio · 47:03" — the media kind from the enclosure type, plus a formatted
+/// duration when present.
+fn podcast_indicator(enc: &Enclosure) -> String {
+    let kind = match enc.enclosure_type.as_deref() {
+        Some(t) if t.starts_with("video") => "Video",
+        Some(t) if t.starts_with("audio") => "Audio",
+        _ => "Media",
+    };
+    match enc
+        .itunes_duration
+        .as_deref()
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+    {
+        Some(d) => format!("{kind} · {}", format_duration(d)),
+        None => kind.to_string(),
+    }
+}
+
+/// Format an iTunes duration: bare seconds become `H:MM:SS` / `M:SS`; anything
+/// else (Feedbin sometimes sends `HH:MM:SS` already) passes through.
+fn format_duration(raw: &str) -> String {
+    match raw.parse::<u64>() {
+        Ok(secs) => {
+            let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
+            if h > 0 {
+                format!("{h}:{m:02}:{s:02}")
+            } else {
+                format!("{m}:{s:02}")
+            }
+        }
+        Err(_) => raw.to_string(),
+    }
+}
+
+/// Build the reader pane's content for one entry: a title / author·date / link
 /// header, then the body — text rendered from HTML, with images shown as
 /// half-block art (a placeholder while loading, a notice when unavailable).
 /// `max_width` is the reader's current inner width; image art is clipped to it
@@ -1063,8 +1137,22 @@ fn reader_text(
     if !meta_parts.is_empty() {
         lines.push(Line::from(meta_parts.join(" · ").dim()));
     }
-    if let Some(url) = &entry.url {
-        lines.push(Line::from(url.clone().underlined()));
+    // Podcast/media indicator when there's an enclosure (TASK-22).
+    if let Some(enc) = &entry.enclosure {
+        lines.push(Line::from(podcast_indicator(enc)).dim());
+    }
+    // Link line(s): a link-blog entry points out to `external_url`, so show that
+    // as the primary link (what `o` opens) and keep the permalink visible so it
+    // stays accessible (TASK-23). Otherwise just the entry url.
+    match (entry.external_url(), &entry.url) {
+        (Some(external), permalink) => {
+            lines.push(Line::from(external.to_string().underlined()));
+            if let Some(url) = permalink {
+                lines.push(Line::from(format!("permalink: {url}")).dim());
+            }
+        }
+        (None, Some(url)) => lines.push(Line::from(url.clone().underlined())),
+        (None, None) => {}
     }
     lines.push(Line::from(""));
 
@@ -1073,24 +1161,22 @@ fn reader_text(
         .as_deref()
         .or(entry.summary.as_deref())
         .unwrap_or("(no content)");
-    for block in content_blocks(body) {
+    let blocks = content_blocks(body);
+    // Lead image (TASK-21): Feedbin's extracted hero image, shown at the top only
+    // when the body has no inline <img> of its own — so image-rich articles are
+    // unchanged and metadata-only feeds still get a picture.
+    let has_inline_image = blocks.iter().any(|b| matches!(b, Segment::Image(_)));
+    if !has_inline_image && let Some(url) = entry.lead_image_url() {
+        push_image(&mut lines, url, images, max_width);
+    }
+    for block in blocks {
         match block {
             Segment::Text(text) => {
                 for line in text.lines() {
                     lines.push(Line::from(line.to_string()));
                 }
             }
-            Segment::Image(url) => match images.get(&url) {
-                Some(ImageState::Ready(art)) => {
-                    lines.push(Line::from(""));
-                    lines.extend(art.iter().map(|line| clip_line_to_width(line, max_width)));
-                    lines.push(Line::from(""));
-                }
-                Some(ImageState::Failed) => {
-                    lines.push(Line::from(format!("[image unavailable: {url}]")).dim());
-                }
-                _ => lines.push(Line::from(format!("[image loading… {url}]")).dim()),
-            },
+            Segment::Image(url) => push_image(&mut lines, &url, images, max_width),
         }
     }
     Text::from(lines)
@@ -1539,6 +1625,9 @@ mod tests {
             published: Some("2026-06-29T00:00:00.000000Z".to_string()),
             summary: Some("summary".to_string()),
             content: content.map(str::to_string),
+            images: None,
+            enclosure: None,
+            json_feed: None,
         }
     }
 
@@ -1590,6 +1679,9 @@ mod tests {
             published: Some(published.to_string()),
             summary: None,
             content: None,
+            images: None,
+            enclosure: None,
+            json_feed: None,
         };
         // Newest-first, as load() produces (published descending).
         let entries = vec![
@@ -1837,6 +1929,9 @@ mod tests {
             published: None,
             summary: None,
             content: Some("<img src=\"https://x/i.png\">".to_string()),
+            images: None,
+            enclosure: None,
+            json_feed: None,
         };
         let collect = |images: &HashMap<String, ImageState>| -> String {
             reader_text(&entry, images, 80)
@@ -1877,6 +1972,9 @@ mod tests {
             published: published.map(str::to_string),
             summary: None,
             content: None,
+            images: None,
+            enclosure: None,
+            json_feed: None,
         }
     }
 
@@ -1969,6 +2067,9 @@ mod tests {
             published: None,
             summary: None,
             content: Some(format!("<img src=\"{url}\">")),
+            images: None,
+            enclosure: None,
+            json_feed: None,
         };
         // One art line 10 cells wide, as if rendered when the terminal was wider.
         let wide = Line::from(Span::styled(
@@ -2007,6 +2108,9 @@ mod tests {
             published: None,
             summary: None,
             content: Some(format!("<p>body</p><img src=\"{img_url}\">")),
+            images: None,
+            enclosure: None,
+            json_feed: None,
         }
     }
 
@@ -2023,6 +2127,9 @@ mod tests {
             published: None,
             summary: None,
             content: Some("<p>no image</p>".to_string()),
+            images: None,
+            enclosure: None,
+            json_feed: None,
         };
         let entries = vec![
             img_entry(1, 7, "https://x/1.png"),
@@ -2129,6 +2236,187 @@ mod tests {
         assert!(loading_at > move_at, "indicator right of help: {footer:?}");
     }
 
+    // --- extended-mode features (TASK-21/22/23) ---------------------------
+
+    use crate::feedbin::{EntryImages, ImageSize, JsonFeed};
+
+    fn lead_images(cdn_url: &str) -> Option<Box<EntryImages>> {
+        Some(Box::new(EntryImages {
+            size_1: Some(ImageSize {
+                cdn_url: Some(cdn_url.to_string()),
+            }),
+        }))
+    }
+
+    /// Flatten a rendered reader into a newline-joined string.
+    fn flatten_reader(entry: &Entry, images: &HashMap<String, ImageState>) -> String {
+        reader_text(entry, images, 80)
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn extended_entry(
+        content: &str,
+        images: Option<Box<EntryImages>>,
+        enclosure: Option<Box<Enclosure>>,
+        json_feed: Option<Box<JsonFeed>>,
+    ) -> Entry {
+        Entry {
+            id: 1,
+            feed_id: 7,
+            title: Some("T".to_string()),
+            url: Some("https://permalink".to_string()),
+            author: None,
+            published: None,
+            summary: None,
+            content: Some(content.to_string()),
+            images,
+            enclosure,
+            json_feed,
+        }
+    }
+
+    #[test]
+    fn open_precedence_is_enclosure_then_external_then_url() {
+        let build = |entry: Entry| {
+            let mut feed_titles = HashMap::new();
+            feed_titles.insert(7, "Feed".to_string());
+            let mut app = App::new();
+            app.apply(Msg::Loaded(Ok(Loaded {
+                entries: vec![entry],
+                feed_titles,
+                total_unread: 1,
+            })));
+            app
+        };
+        let enc = || {
+            Some(Box::new(Enclosure {
+                enclosure_url: Some("https://media.mp3".to_string()),
+                enclosure_type: Some("audio/mpeg".to_string()),
+                itunes_duration: None,
+            }))
+        };
+        let ext = || {
+            Some(Box::new(JsonFeed {
+                external_url: Some("https://external".to_string()),
+            }))
+        };
+        // Plain entry: the permalink.
+        assert_eq!(
+            build(extended_entry("<p>b</p>", None, None, None))
+                .selected_url()
+                .as_deref(),
+            Some("https://permalink")
+        );
+        // Link blog: external_url wins over the permalink (TASK-23).
+        assert_eq!(
+            build(extended_entry("<p>b</p>", None, None, ext()))
+                .selected_url()
+                .as_deref(),
+            Some("https://external")
+        );
+        // Podcast: the enclosure wins over everything (TASK-22).
+        assert_eq!(
+            build(extended_entry("<p>b</p>", None, enc(), ext()))
+                .selected_url()
+                .as_deref(),
+            Some("https://media.mp3")
+        );
+    }
+
+    #[test]
+    fn lead_image_shown_and_prefetched_only_without_an_inline_image() {
+        let mut images = HashMap::new();
+        // A resolved (Failed) state makes the placeholder echo the URL so we can
+        // assert which image the reader chose.
+        images.insert("https://cdn/lead.jpg".to_string(), ImageState::Failed);
+
+        // No inline <img>: the lead image is used (TASK-21).
+        let no_inline = extended_entry(
+            "<p>text only</p>",
+            lead_images("https://cdn/lead.jpg"),
+            None,
+            None,
+        );
+        assert!(
+            flatten_reader(&no_inline, &images).contains("https://cdn/lead.jpg"),
+            "lead image shown when the body has none"
+        );
+
+        // Body has an inline <img>: the lead image is suppressed (no dup).
+        let with_inline = extended_entry(
+            "<p>x</p><img src=\"https://body/img.png\">",
+            lead_images("https://cdn/lead.jpg"),
+            None,
+            None,
+        );
+        let out = flatten_reader(&with_inline, &images);
+        assert!(
+            !out.contains("https://cdn/lead.jpg"),
+            "lead image suppressed when the body has an inline image: {out:?}"
+        );
+        assert!(out.contains("https://body/img.png"), "inline image kept");
+
+        // Pre-fetch picks up the lead image too, so it loads and counts.
+        let mut feed_titles = HashMap::new();
+        feed_titles.insert(7, "Feed".to_string());
+        let mut app = App::new();
+        app.apply(Msg::Loaded(Ok(Loaded {
+            entries: vec![extended_entry(
+                "<p>text only</p>",
+                lead_images("https://cdn/lead.jpg"),
+                None,
+                None,
+            )],
+            feed_titles,
+            total_unread: 1,
+        })));
+        assert!(
+            app.image_urls.contains(&"https://cdn/lead.jpg".to_string()),
+            "lead image is pre-fetched"
+        );
+    }
+
+    #[test]
+    fn reader_shows_podcast_indicator_and_external_link_with_permalink() {
+        let entry = extended_entry(
+            "<p>body</p>",
+            None,
+            Some(Box::new(Enclosure {
+                enclosure_url: Some("https://media.mp3".to_string()),
+                enclosure_type: Some("audio/mpeg".to_string()),
+                itunes_duration: Some("2823".to_string()),
+            })),
+            Some(Box::new(JsonFeed {
+                external_url: Some("https://external-target".to_string()),
+            })),
+        );
+        let out = flatten_reader(&entry, &HashMap::new());
+        // Podcast: media kind + duration (2823s = 47:03) (TASK-22).
+        assert!(out.contains("Audio · 47:03"), "podcast indicator: {out:?}");
+        // Link blog: external target is the primary link; permalink kept (TASK-23).
+        assert!(
+            out.contains("https://external-target"),
+            "external url: {out:?}"
+        );
+        assert!(
+            out.contains("permalink: https://permalink"),
+            "permalink kept: {out:?}"
+        );
+    }
+
+    #[test]
+    fn format_duration_seconds_and_passthrough() {
+        assert_eq!(format_duration("2823"), "47:03");
+        assert_eq!(format_duration("3661"), "1:01:01");
+        assert_eq!(format_duration("42"), "0:42");
+        // Already formatted (non-numeric) passes through untouched.
+        assert_eq!(format_duration("47:03"), "47:03");
+    }
+
     #[test]
     fn images_are_queued_top_to_bottom() {
         // Two sources; the queue must follow on-screen order: sources by name
@@ -2145,6 +2433,9 @@ mod tests {
             published: Some(published.to_string()),
             summary: None,
             content: Some(format!("<img src=\"{url}\">")),
+            images: None,
+            enclosure: None,
+            json_feed: None,
         };
         // Stored newest-first per source, as load() produces.
         let entries = vec![
@@ -2221,6 +2512,9 @@ mod tests {
             published: None,
             summary: None,
             content: Some(format!("<p>{long}</p>")),
+            images: None,
+            enclosure: None,
+            json_feed: None,
         };
         let mut app = App::new();
         app.apply(Msg::Loaded(Ok(Loaded {
@@ -2345,6 +2639,9 @@ mod tests {
             published: Some(published.to_string()),
             summary: None,
             content: None,
+            images: None,
+            enclosure: None,
+            json_feed: None,
         };
         // Stored newest-first, as load() produces; the column shows oldest-first.
         let entries = vec![
@@ -2561,6 +2858,9 @@ mod tests {
             published: None,
             summary: None,
             content: Some(content.to_string()),
+            images: None,
+            enclosure: None,
+            json_feed: None,
         };
         let mut app = App::new();
         app.apply(Msg::Loaded(Ok(Loaded {
