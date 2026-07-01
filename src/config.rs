@@ -244,4 +244,27 @@ mod tests {
             PathBuf::from("/home/ross/.config/roses")
         );
     }
+
+    /// End-to-end round-trip against a real OS Secret Service, proving the Linux
+    /// keychain path actually stores, reads back, and deletes a password.
+    /// `#[ignore]`d because it needs a running keyring daemon: CI runs it on
+    /// Linux inside `dbus-run-session` with gnome-keyring unlocked (see
+    /// `.github/workflows/ci.yml` / `docs/ci.md`). Linux-only so a stray
+    /// `cargo test -- --ignored` on macOS never touches the dev's login Keychain.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "needs a running Secret Service; CI runs it under dbus-run-session"]
+    fn keychain_round_trip_via_secret_service() {
+        // Unique per run so leftover state / parallel jobs can't collide.
+        let email = format!("roses-it-{}@example.test", std::process::id());
+
+        store_password(&email, "hunter2").expect("store password");
+        assert_eq!(
+            get_password(&email).expect("read password").as_deref(),
+            Some("hunter2"),
+        );
+
+        delete_password(&email).expect("delete password");
+        assert_eq!(get_password(&email).expect("read after delete"), None);
+    }
 }

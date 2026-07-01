@@ -47,3 +47,40 @@ jobs:
 
       - name: Tests — cargo test
         run: cargo test --locked
+
+  # Exercises the Linux keychain path end-to-end against a real Secret Service.
+  # The regular `cargo test` above skips it (the round-trip test is `#[ignore]`d
+  # and needs a running keyring daemon); here we provision gnome-keyring on the
+  # headless runner and run just that test. Kept as a separate job so a keyring
+  # hiccup can never block the core lint-and-test checks. See docs/ci.md.
+  linux-keychain:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v7
+
+      - name: Install the pinned Rust toolchain (stable)
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Cache cargo registry and build output
+        uses: Swatinem/rust-cache@v2
+
+      # gnome-keyring provides the Secret Service (org.freedesktop.secrets) that
+      # the zbus keyring backend talks to; dbus provides `dbus-run-session`.
+      - name: Install gnome-keyring + dbus
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gnome-keyring dbus
+
+      # Run the ignored round-trip test inside a fresh D-Bus session with an
+      # unlocked login keyring. `--components=secrets` makes gnome-keyring serve
+      # the Secret Service API; the password on stdin creates/unlocks the keyring.
+      - name: Keychain round-trip against the Secret Service
+        run: |
+          rm -f "$HOME/.local/share/keyrings/"* || true
+          dbus-run-session -- bash -euo pipefail -c '
+            echo -n "roses-ci" | gnome-keyring-daemon --unlock --components=secrets
+            cargo test --locked -- --ignored keychain_round_trip_via_secret_service
+          '

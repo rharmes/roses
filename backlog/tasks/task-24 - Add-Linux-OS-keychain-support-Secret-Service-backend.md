@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@ross'
 created_date: '2026-06-30 21:19'
-updated_date: '2026-07-01 13:23'
+updated_date: '2026-07-01 13:33'
 labels:
   - rust
 dependencies: []
@@ -63,6 +63,8 @@ Verification (via cargo tree --target, since this host is macOS):
 - cargo fmt/clippy -D warnings clean; 83 tests pass, stable x3; Cargo.lock unchanged.
 
 AC #4 note: keyring::Error is #[non_exhaustive], so the error variant can't be constructed in a unit test, and CI (headless ubuntu) has no Secret Service to exercise the live path; the clear-message/no-panic behavior is covered by the Result-based flow + review rather than a bespoke test. Linux runtime persistence itself is not exercisable on this macOS host.
+
+Added a real Linux runtime test (approved add-on, strengthens AC #1 verification): config::tests::keychain_round_trip_via_secret_service — #[ignore]d + #[cfg(target_os=linux)], stores/reads/deletes a unique-per-run password. New CI job 'linux-keychain' provisions gnome-keyring under dbus-run-session and runs it via 'cargo test -- --ignored'. Separate job (not a required check yet) so a keyring/D-Bus hiccup can't block lint-and-test; docs/ci.md documents promoting it once stable. Can't dry-run locally (no Docker on this macOS host + ring cross-compile blocks cargo check --target linux) — verifying via the CI run. docs/ci.md + architecture.md CI notes updated.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

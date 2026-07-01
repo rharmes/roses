@@ -290,6 +290,9 @@ redraw.
 - CI (`.github/workflows/ci.yml`, job `lint-and-test`): on push + PR, install the pinned toolchain
   (rustfmt + clippy) with cargo caching, then `cargo fmt --all --check`, `cargo clippy --all-targets --
   -D warnings`, `cargo test --locked`. `main` requires the `lint-and-test` check (branch protection).
+  A separate `linux-keychain` job provisions gnome-keyring under `dbus-run-session` and runs the
+  `#[ignore]`d, Linux-only `keychain_round_trip_via_secret_service` test to verify the Secret Service
+  path end-to-end (see [`ci.md`](ci.md)).
 
 ## Dependencies (why)
 
