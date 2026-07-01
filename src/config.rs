@@ -79,28 +79,64 @@ fn save_settings(settings: &Settings) -> Result<()> {
     fs::write(&path, text).with_context(|| format!("writing {}", path.display()))
 }
 
+/// Hint attached when a keychain operation fails because the store itself is
+/// unavailable — most commonly on Linux when no Secret Service is reachable.
+const KEYCHAIN_UNAVAILABLE_HINT: &str = "the OS keychain is unavailable — on Linux the Feedbin password is stored in the Secret \
+     Service, so a keyring daemon (GNOME Keyring, KWallet, …) must be running and unlocked";
+
+/// True when the failure is the keychain backend being absent or locked (rather
+/// than a specific entry simply not existing), so we can attach an actionable
+/// hint. keyring returns `NoDefaultStore` on Linux when no Secret Service could
+/// be reached; `NoStorageAccess` covers a locked/blocked store.
+fn keychain_unavailable(err: &keyring::Error) -> bool {
+    matches!(
+        err,
+        keyring::Error::NoDefaultStore | keyring::Error::NoStorageAccess(_)
+    )
+}
+
+/// Wrap a keyring failure with the operation context, plus the "keychain
+/// unavailable" hint when that is the underlying cause. Keeps every keychain
+/// path fallible (no panic) with a clear message.
+fn keyring_error(op: &'static str, err: keyring::Error) -> anyhow::Error {
+    let unavailable = keychain_unavailable(&err);
+    let err = anyhow::Error::new(err).context(op);
+    if unavailable {
+        err.context(KEYCHAIN_UNAVAILABLE_HINT)
+    } else {
+        err
+    }
+}
+
 fn keyring_entry(email: &str) -> Result<keyring::Entry> {
-    keyring::Entry::new(APP_NAME, email).context("opening the OS keychain entry")
+    keyring::Entry::new(APP_NAME, email)
+        .map_err(|e| keyring_error("opening the OS keychain entry", e))
 }
 
 fn store_password(email: &str, password: &str) -> Result<()> {
     keyring_entry(email)?
         .set_password(password)
-        .context("storing the password in the OS keychain")
+        .map_err(|e| keyring_error("storing the password in the OS keychain", e))
 }
 
 fn get_password(email: &str) -> Result<Option<String>> {
     match keyring_entry(email)?.get_password() {
         Ok(password) => Ok(Some(password)),
         Err(keyring::Error::NoEntry) => Ok(None),
-        Err(e) => Err(e).context("reading the password from the OS keychain"),
+        Err(e) => Err(keyring_error(
+            "reading the password from the OS keychain",
+            e,
+        )),
     }
 }
 
 fn delete_password(email: &str) -> Result<()> {
     match keyring_entry(email)?.delete_credential() {
         Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-        Err(e) => Err(e).context("deleting the password from the OS keychain"),
+        Err(e) => Err(keyring_error(
+            "deleting the password from the OS keychain",
+            e,
+        )),
     }
 }
 

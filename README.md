@@ -21,9 +21,10 @@ curl --proto '=https' --tlsv1.2 -LsSf \
   https://github.com/rharmes/roses/releases/latest/download/roses-installer.sh | sh
 ```
 
-> **Linux note:** the Feedbin password is stored in the OS keychain, which is wired
-> up for macOS only — on Linux the login isn't persisted yet. See
-> [`docs/release.md`](docs/release.md).
+> **Linux note:** the Feedbin password is kept in the OS keychain — the native
+> Keychain on macOS, the Secret Service (GNOME Keyring, KWallet, …) on Linux. On
+> Linux a keyring daemon must be running and unlocked for the login to persist
+> across runs. See [`docs/release.md`](docs/release.md).
 
 ## Build & run
 

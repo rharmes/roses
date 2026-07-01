@@ -13,7 +13,6 @@ anyhow = "1.0.103"
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 dirs = "6.0.0"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
-keyring = { version = "4.1.2", features = ["apple-native-keyring-store"] }
 ratatui = { version = "0.30.2", features = ["unstable-rendered-line-info"] }
 reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "json", "query", "rustls"] }
 rpassword = "7.5.4"
@@ -22,6 +21,25 @@ shlex = "2.0.1"
 tokio = { version = "1.52.3", default-features = false, features = ["rt", "sync"] }
 toml = "1.1.2"
 unicode-width = "0.2.2"
+
+# OS keychain for the Feedbin password (service "roses", username = email). The
+# backend is chosen per platform so each build links only the store it needs;
+# keyring's default `v1` feature provides the cross-platform `Entry` API and
+# lazily registers the platform store on first use.
+#   * macOS — the native Keychain (apple-native-keyring-store).
+#   * Linux — the Secret Service (GNOME Keyring / KWallet) over D-Bus via the
+#     pure-Rust *zbus* backend, so the static musl release binary links with no
+#     C libdbus dependency.
+# roses ships binaries only for these two (see docs/release.md); any other
+# platform still builds via keyring's default backend for that OS.
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "4.1.2", features = ["apple-native-keyring-store"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "4.1.2", features = ["zbus-secret-service-keyring-store"] }
+
+[target.'cfg(not(any(target_os = "macos", target_os = "linux")))'.dependencies]
+keyring = "4.1.2"
 
 [dev-dependencies]
 mockito = "1.7.2"

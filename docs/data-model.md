@@ -131,9 +131,11 @@ read from the OS keychain and sent as HTTP Basic auth. Never serialized.
 
 ### OS keychain
 
-The Feedbin password is stored via `keyring` — service `"roses"`, username = email. macOS uses the
-native Keychain (`apple-native-keyring-store`); Linux would use the Secret Service. `roses logout`
-deletes the keychain entry and clears `email` (keeping other settings).
+The Feedbin password is stored via `keyring` — service `"roses"`, username = email. The backend is
+cfg-gated per platform: macOS uses the native Keychain (`apple-native-keyring-store`); Linux uses the
+Secret Service (GNOME Keyring / KWallet) via the pure-Rust zbus backend (`zbus-secret-service-keyring-store`),
+which needs a running keyring daemon at runtime (else a keychain op fails with a clear error, no panic).
+`roses logout` deletes the keychain entry and clears `email` (keeping other settings).
 
 ### `config::BrowserPref` (`pub`)
 
