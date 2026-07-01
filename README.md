@@ -73,7 +73,9 @@ refresh_interval_secs = 300
 | `←`/`h`, `→`/`l` | Move focus across columns (sources → articles → reader) |
 | `g`/`Home`, `G`/`End` | First / last item (or top / bottom of the reader) |
 | `PgUp`/`PgDn` | Page the reader |
-| `m` / `u` | Mark the selected article read / undo the last mark |
+| `m` / `u` | Mark the selected article read / undo the last mark (undo restores a whole bulk mark too) |
+| `M` | Mark every loaded article in the selected source read |
+| `A` | Mark the whole loaded window read (asks `y`/`n` first) |
 | `o` | Open in the browser — a podcast enclosure, else a link-blog's external link, else the article URL |
 | `r` | Reload |
 | `q`/`Esc` | Quit |

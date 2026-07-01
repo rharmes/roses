@@ -96,8 +96,11 @@ So `App` is only ever touched on the main thread; background threads communicate
 ### Actions (keypress → effect)
 
 `handle_key` mutates selection/scroll directly and returns an `Action` for effects the loop must drive:
-`Reload` (refetch), `MarkRead`, `Undo`, `OpenInBrowser`, or `None`. Mark/undo go through the optimistic
-flow below; open-in-browser is handled inline by `open_selected`.
+`Reload` (refetch), `MarkRead`, `MarkSourceRead`, `MarkWindowRead`, `Undo`, `OpenInBrowser`, or `None`.
+All three mark variants and undo go through the optimistic **batch** flow below; open-in-browser is handled
+inline by `open_selected`. `handle_key` also owns a one-key **confirmation** intercept: while
+`pending_confirm` is set (only `A`/`MarkWindowRead` arms it), the next key answers it — `y`/`Y` proceeds,
+anything else cancels — instead of firing its normal binding (TASK-30).
 
 ## Network layer (`feedbin.rs`)
 
@@ -136,7 +139,7 @@ A three-column [Miller-columns] layout over a 1-line footer:
 │ feeds + counts│ titles of the  │ selected      │
 │ (by name)     │ selected source│ article body  │
 └───────────────┴────────────────┴───────────────┘
- ↑↓ move · ←→ focus · m read · u undo · o open · r reload · q quit
+ ↑↓ move · ←→ focus · m read · M src · A all · u undo · o open · r reload · q quit
 ```
 
 A single **focus cursor** (`Focus::{Sources, Articles, Reader}`) moves between columns. The focused
@@ -193,25 +196,38 @@ too small for the art it degrades to just the centered caption. Loading and `Fai
 | `←`/`h`, `→`/`l` | Move focus across columns (preserving each column's cursor). |
 | `g`/`Home`, `G`/`End` | First / last in the focused column (or top/bottom of the reader). |
 | `PgUp`/`PgDn` | Page the reader (only when the reader is focused). |
-| `m` / `u` | Mark the selected article read / undo the last mark. |
+| `m` / `u` | Mark the selected article read / undo the last mark (undo restores a whole bulk batch too — TASK-30). |
+| `M` | Mark **every loaded article in the selected source** read (works from any focus; TASK-30). |
+| `A` | Mark the **whole loaded window** read, behind a `y`/`n` footer confirmation (TASK-30). |
 | `o` | Open the selected entry in the browser — a podcast enclosure, else a link-blog `external_url`, else the article URL. |
 | `r` | Reload (preserves your place by id — see the selection note above). |
 | `q` / `Esc` | Quit (restores the terminal). |
 
-### Optimistic mark-read + undo (TASK-7, AC #4)
+### Optimistic mark-read + undo (TASK-7 AC #4, TASK-30)
 
-Writes update the UI immediately and roll back on failure so client and server stay consistent:
+Writes update the UI immediately and roll back on failure so client and server stay consistent. The single
+and **bulk** marks share one **batch** path: a write carries a `Vec<(Entry, usize)>` (a single `m` is a
+one-element batch), so one `Msg::Write`/`spawn_write` and one undo entry serve all cases, and the client
+sends the whole batch in one request (it batches at its 1,000-id limit internally).
 
-- `begin_mark_read()` removes the entry from `entries` now, decrements `total_unread`, picks a sensible
-  next selection (`reselect_after_removal`), and returns `(entry, index)` for the network write.
-  - `Msg::Write{MarkRead, Ok}` → push `Undone{entry, index}` onto `undo_stack`.
-  - `Msg::Write{MarkRead, Err}` → `reinsert()` the entry (rollback) + a red footer notice.
-- `begin_undo()` pops `undo_stack`, re-inserts the entry optimistically, returns it for `mark_unread`.
-  - `Msg::Write{Undo, Err}` → remove again, re-push to `undo_stack` (retryable) + notice.
+- `begin_mark_read()` removes the selected entry now, decrements `total_unread`, picks a sensible next
+  selection (`reselect_after_removal`), and returns a one-element batch for the network write.
+- `begin_mark_source_read()` (`M`) / `begin_mark_window_read()` (`A`) remove **every loaded entry** of the
+  selected source / of the whole window via the shared `remove_batch` (remove back-to-front so indices stay
+  valid, then restore ascending-index order for a clean undo). Scope is the **loaded window only** —
+  un-hydrated `pending_ids` stay unread and the next batch auto-hydrates as usual (`near_tail`).
+  - `Msg::Write{MarkRead, Ok}` → push one `Undone{batch}` onto `undo_stack`.
+  - `Msg::Write{MarkRead, Err}` → `reinsert_batch()` the whole batch (rollback) + a red footer notice.
+- `begin_undo()` (`u`) pops one `Undone` and `reinsert_batch()`es the whole batch optimistically at its
+  original indices, returning it for `mark_unread` — so **one undo reverses a bulk mark in a single step**.
+  - `Msg::Write{Undo, Err}` → remove the batch again, `preserve_or_reselect`, re-push (retryable) + notice.
+
+The whole-window mark (`A`) is gated by a one-key `y`/`n` **confirmation** (`pending_confirm`); the source
+mark (`M`) is instant (the source visibly disappears, and `u` undoes it).
 
 A `Msg::Loaded` **preserves** the undo stack across a reload or auto-refresh (a silent background refresh
-must not wipe a recent mark-read's undo — TASK-37); it drops only the entries the fresh set re-added, so a
-later undo can't duplicate a now-present row.
+must not wipe a recent mark-read's undo — TASK-37); it drops any batch with an entry the fresh set re-added,
+so a later undo can't duplicate a now-present row.
 
 ### Reader content pipeline
 

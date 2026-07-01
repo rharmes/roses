@@ -73,8 +73,9 @@ end (TASK-40) — so every unread entry is reachable without a separate paging e
 | `reader_width` | `u16` | Reader inner width from the last draw; sizes pre-fetched art. |
 | `reader_cache` | `Option<ReaderCache>` | Memoized reader render, keyed by `(entry id, width, image_generation)`; rebuilt only on a key miss (TASK-28). |
 | `image_generation` | `u64` | Bumped whenever an image resolves, so the reader cache invalidates when a visible image finishes (TASK-28). |
-| `undo_stack` | `Vec<Undone>` | Marked-read entries that can be restored (most recent last). |
+| `undo_stack` | `Vec<Undone>` | Marked-read **batches** that can be restored (most recent last); a single `m` is a batch of one (TASK-30). |
 | `notice` | `Option<String>` | Transient footer message (e.g. a write failure); cleared on next key. |
+| `pending_confirm` | `Option<Confirm>` | A pending footer `y`/`n` confirmation; the next key answers it instead of its normal binding (only `A`/`MarkWindowRead` arms it — TASK-30). |
 | `should_quit` | `bool` | Set by `q`/`Esc`. |
 
 **Why selection-by-id:** mark/undo insert and remove `entries`, which would invalidate stored indices.
@@ -89,7 +90,7 @@ recomputed from the ids each frame (`source_index`, `article_index`).
 - `ReaderCache { key: (i64, u16, u64), text: Text, wrapped: u16 }` — memoized reader render (TASK-28).
 - `Msg` — background-worker → UI-loop messages:
   - `Loaded(Result<Loaded, String>)`
-  - `Write { op: WriteOp, entry: Entry, index: usize, result: Result<(), String> }`
+  - `Write { op: WriteOp, batch: Vec<(Entry, usize)>, result: Result<(), String> }` — a mark/undo write over one or more entries (a single `m`/`u` is a one-element batch; bulk marks carry the whole set — TASK-30).
   - `Image { url: String, result: Result<Vec<Line<'static>>, String> }`
   - `LoadedMore(Result<Vec<Entry>, String>)` — a lazily-hydrated older batch to append (TASK-40).
   - `NotModified` — the conditional unread fetch 304'd; keep the current view (TASK-42).
@@ -97,8 +98,9 @@ recomputed from the ids each frame (`source_index`, `article_index`).
 - `LoadOutcome { NotModified, Fresh(Loaded, Validators) }` — what `load()` returns to `spawn_fetch` (TASK-42).
 - `feedbin::Validators { etag: Option<String>, last_modified: Option<String> }` + `Conditional<T> { NotModified, Modified { data, validators } }` — HTTP-caching types; stored in the cache's `meta` table under `unread.etag` / `unread.last_modified`.
 - `WriteOp { MarkRead, Undo }` — which unread-state write a `spawn_write` performed.
-- `Undone { entry: Entry, index: usize }` — an undoable mark-read (entry + its position in `entries`).
-- `Action { None, Reload, MarkRead, Undo, OpenInBrowser }` — what a keypress asks the loop to do.
+- `Undone { batch: Vec<(Entry, usize)> }` — an undoable mark-read: the entries + their positions in `entries`, restored as a unit so one `u` reverses a bulk mark (TASK-30).
+- `Action { None, Reload, MarkRead, MarkSourceRead, MarkWindowRead, Undo, OpenInBrowser }` — what a keypress asks the loop to do (`MarkSourceRead`=`M`, `MarkWindowRead`=`A`; TASK-30).
+- `Confirm { MarkWindowRead }` — a pending footer `y`/`n` confirmation intercepting the next key (TASK-30).
 - `Segment { Text(String), Image(String) }` — one piece of reader content in document order.
 - `ImageState { Loading, Ready(Vec<Line<'static>>), Failed }` — image cache entry.
 
