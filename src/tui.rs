@@ -17,7 +17,7 @@ use ratatui::layout::{Alignment, Constraint, Flex, Layout, Margin, Rect};
 use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
-    Block, List, ListItem, ListState, Padding, Paragraph, Scrollbar, ScrollbarOrientation,
+    Block, Clear, List, ListItem, ListState, Padding, Paragraph, Scrollbar, ScrollbarOrientation,
     ScrollbarState, Wrap,
 };
 use ratatui::{DefaultTerminal, Frame};
@@ -208,6 +208,8 @@ struct App {
     /// A pending y/n confirmation shown in the footer; the next key answers it
     /// (`y` proceeds, anything else cancels) instead of its normal binding.
     pending_confirm: Option<Confirm>,
+    /// Whether the keybinding help overlay is open (`?` toggles it — TASK-32).
+    show_help: bool,
     should_quit: bool,
 }
 
@@ -234,6 +236,7 @@ impl App {
             undo_stack: Vec::new(),
             notice: None,
             pending_confirm: None,
+            show_help: false,
             should_quit: false,
         }
     }
@@ -819,6 +822,12 @@ impl App {
 
     /// Handle one key press; returns an [`Action`] the run loop must drive.
     fn handle_key(&mut self, code: KeyCode) -> Action {
+        // The help overlay is modal: while it's open, any key just dismisses it
+        // (TASK-32) — `?`/`Esc`/`q` included — and does nothing else.
+        if self.show_help {
+            self.show_help = false;
+            return Action::None;
+        }
         // A pending confirmation swallows the next key (TASK-30): `y`/`Y`
         // proceeds, anything else (incl. `n`/Esc/navigation) cancels.
         if let Some(confirm) = self.pending_confirm.take() {
@@ -853,6 +862,7 @@ impl App {
             KeyCode::Char('u') => return Action::Undo,
             KeyCode::Char('o') => return Action::OpenInBrowser,
             KeyCode::Char('r') => return Action::Reload,
+            KeyCode::Char('?') => self.show_help = true,
             _ => {}
         }
         Action::None
@@ -941,6 +951,12 @@ impl App {
                 );
             }
             None => frame.render_widget(footer_line, footer),
+        }
+
+        // The help overlay floats above everything else (TASK-32); it's pure
+        // chrome, so the underlying App state (selection, loads) is untouched.
+        if self.show_help {
+            draw_help_overlay(frame, main);
         }
     }
 
@@ -1147,30 +1163,172 @@ impl App {
 
 /// The footer key-help line, with the action keys accented in rose (TASK-14); the
 /// arrows, labels, and separators stay dim.
+/// One keyboard binding. This table is the **single source of truth** for both
+/// the 1-line footer hint and the `?` help overlay (TASK-32), so the two can't
+/// drift apart as bindings are added. Entries are grouped for the overlay by
+/// consecutive `group`; `footer` is `Some((keys, label))` for the compact subset
+/// shown in the footer, else the binding is overlay-only (e.g. `M`/`A`).
+struct Binding {
+    group: &'static str,
+    keys: &'static str,
+    desc: &'static str,
+    footer: Option<(&'static str, &'static str)>,
+}
+
+const BINDINGS: &[Binding] = &[
+    Binding {
+        group: "Navigation",
+        keys: "↑ ↓  k j",
+        desc: "Move within the column",
+        footer: Some(("↑↓", "move")),
+    },
+    Binding {
+        group: "Navigation",
+        keys: "← →  h l",
+        desc: "Change the focused column",
+        footer: Some(("←→", "focus")),
+    },
+    Binding {
+        group: "Navigation",
+        keys: "g / G",
+        desc: "First / last item",
+        footer: None,
+    },
+    Binding {
+        group: "Reading",
+        keys: "PgUp / PgDn",
+        desc: "Page the reader",
+        footer: None,
+    },
+    Binding {
+        group: "Reading",
+        keys: "o",
+        desc: "Open in browser",
+        footer: Some(("o", "open")),
+    },
+    Binding {
+        group: "Marking read",
+        keys: "m",
+        desc: "Mark the article read",
+        footer: Some(("m", "read")),
+    },
+    Binding {
+        group: "Marking read",
+        keys: "M",
+        desc: "Mark the source read",
+        footer: None,
+    },
+    Binding {
+        group: "Marking read",
+        keys: "A",
+        desc: "Mark the window read (asks y / n)",
+        footer: None,
+    },
+    Binding {
+        group: "Marking read",
+        keys: "u",
+        desc: "Undo the last mark",
+        footer: Some(("u", "undo")),
+    },
+    Binding {
+        group: "App",
+        keys: "r",
+        desc: "Reload",
+        footer: Some(("r", "reload")),
+    },
+    Binding {
+        group: "App",
+        keys: "? / Esc",
+        desc: "Toggle this help",
+        footer: Some(("?", "help")),
+    },
+    Binding {
+        group: "App",
+        keys: "q",
+        desc: "Quit",
+        footer: Some(("q", "quit")),
+    },
+];
+
+/// The 1-line footer hint: the footer-flagged bindings as `keys label · …`, keys
+/// accented rose and labels dim, derived from [`BINDINGS`] so it never drifts.
 fn footer_help() -> Line<'static> {
-    let key = |k: &'static str| Span::styled(k, Style::new().fg(theme::ROSE).bold());
-    let text = |s: &'static str| Span::raw(s).dim();
-    Line::from(vec![
-        text(" "),
-        key("↑↓"),
-        text(" move · "),
-        key("←→"),
-        text(" focus · "),
-        key("m"),
-        text(" read · "),
-        key("M"),
-        text(" src · "),
-        key("A"),
-        text(" all · "),
-        key("u"),
-        text(" undo · "),
-        key("o"),
-        text(" open · "),
-        key("r"),
-        text(" reload · "),
-        key("q"),
-        text(" quit "),
-    ])
+    let mut spans: Vec<Span<'static>> = vec![Span::raw(" ")];
+    let mut first = true;
+    for b in BINDINGS {
+        let Some((keys, label)) = b.footer else {
+            continue;
+        };
+        if !first {
+            spans.push(Span::raw(" · ").dim());
+        }
+        first = false;
+        spans.push(Span::styled(keys, Style::new().fg(theme::ROSE).bold()));
+        spans.push(Span::raw(format!(" {label}")).dim());
+    }
+    spans.push(Span::raw(" "));
+    Line::from(spans)
+}
+
+/// The help-overlay body (TASK-32): every binding, grouped under bold headings,
+/// with a rose-accented key column aligned to the widest key. Built from the same
+/// [`BINDINGS`] table as the footer.
+fn help_lines() -> Vec<Line<'static>> {
+    let key_w = BINDINGS
+        .iter()
+        .map(|b| UnicodeWidthStr::width(b.keys))
+        .max()
+        .unwrap_or(0);
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut group = "";
+    for b in BINDINGS {
+        if b.group != group {
+            if !group.is_empty() {
+                lines.push(Line::from(""));
+            }
+            lines.push(Line::from(Span::raw(b.group).bold()));
+            group = b.group;
+        }
+        let pad = key_w.saturating_sub(UnicodeWidthStr::width(b.keys)) + 2;
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(b.keys, Style::new().fg(theme::ROSE).bold()),
+            Span::raw(" ".repeat(pad)),
+            Span::raw(b.desc),
+        ]));
+    }
+    lines
+}
+
+/// Draw the keybinding help overlay: a centered, rose-bordered box floating over
+/// `area`, sized to its content (clamped to `area`). Pure chrome — it reads no
+/// mutable state, so background loading and selection are unaffected (TASK-32).
+fn draw_help_overlay(frame: &mut Frame, area: Rect) {
+    let lines = help_lines();
+    let content_w = lines.iter().map(Line::width).max().unwrap_or(0) as u16;
+    let title = " Keyboard shortcuts ";
+    let title_w = UnicodeWidthStr::width(title) as u16;
+    // + border (2) + horizontal padding (2).
+    let width = (content_w.max(title_w) + 4).min(area.width);
+    let height = (lines.len() as u16 + 2).min(area.height); // + top/bottom border
+    let rect = centered_rect(area, width, height);
+    let block = Block::bordered()
+        .border_style(Style::new().fg(theme::ROSE))
+        .title(Span::styled(title, Style::new().fg(theme::ROSE).bold()))
+        .padding(Padding::horizontal(1));
+    frame.render_widget(Clear, rect);
+    frame.render_widget(Paragraph::new(lines).block(block), rect);
+}
+
+/// A `width`×`height` rect centered within `area` (both axes) via `Flex::Center`.
+fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
+    let [row] = Layout::vertical([Constraint::Length(height)])
+        .flex(Flex::Center)
+        .areas(area);
+    let [cell] = Layout::horizontal([Constraint::Length(width)])
+        .flex(Flex::Center)
+        .areas(row);
+    cell
 }
 
 /// Braille spinner frames for the background-loading indicator (TASK-19).
@@ -2470,6 +2628,118 @@ mod tests {
         // `A` with an empty window arms nothing (no prompt, no action).
         assert!(matches!(app.handle_key(KeyCode::Char('A')), Action::None));
         assert!(app.pending_confirm.is_none());
+    }
+
+    // --- Help overlay (TASK-32) -------------------------------------------
+
+    #[test]
+    fn help_overlay_toggles_with_question_mark_and_any_key_closes() {
+        let mut app = app_with(&[(9, "Hacker News", 2)]);
+        let (src, art, focus) = (app.selected_source, app.selected_article, app.focus);
+        assert!(!app.show_help);
+        // `?` opens it, taking no other action.
+        assert!(matches!(app.handle_key(KeyCode::Char('?')), Action::None));
+        assert!(app.show_help, "help opened");
+        // Any key closes it and does nothing else (here `j` must not also move).
+        assert!(matches!(app.handle_key(KeyCode::Char('j')), Action::None));
+        assert!(!app.show_help, "help closed by any key");
+        // Closing help via a nav key doesn't also navigate.
+        assert_eq!(app.selected_source, src);
+        assert_eq!(app.selected_article, art);
+        assert!(app.focus == focus, "focus unchanged");
+    }
+
+    #[test]
+    fn help_overlay_esc_and_q_close_without_quitting() {
+        let mut app = app_with(&[(9, "Hacker News", 1)]);
+        let _ = app.handle_key(KeyCode::Char('?'));
+        let _ = app.handle_key(KeyCode::Esc);
+        assert!(!app.show_help, "Esc closes the overlay");
+        assert!(!app.should_quit, "Esc closes help rather than quitting");
+
+        let _ = app.handle_key(KeyCode::Char('?'));
+        let _ = app.handle_key(KeyCode::Char('q'));
+        assert!(!app.show_help, "q closes the overlay");
+        assert!(!app.should_quit, "q closes help rather than quitting");
+    }
+
+    #[test]
+    fn help_overlay_does_not_disturb_selection_or_loading() {
+        // AC #2: opening the overlay is pure chrome — a background load still
+        // applies and the selection is preserved.
+        let mut app = app_with(&[(9, "Hacker News", 2)]);
+        app.focus_right();
+        let sel = app.selected_article;
+        let _ = app.handle_key(KeyCode::Char('?'));
+        app.apply(Msg::Loaded(Ok(Loaded {
+            entries: app.entries.clone(),
+            feed_titles: app.feed_titles.clone(),
+            total_unread: 2,
+            pending_ids: Vec::new(),
+        })));
+        assert!(app.show_help, "still open across a background load");
+        assert_eq!(app.selected_article, sel, "selection preserved");
+    }
+
+    #[test]
+    fn footer_moves_bulk_marks_into_the_overlay() {
+        // The footer no longer hints M/A (they moved to the overlay) but gains
+        // the `?` help hint — both derived from the single BINDINGS table.
+        let footer: String = footer_help()
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(footer.contains("help"), "footer advertises the help key");
+        assert!(
+            !footer.contains(" src "),
+            "bulk source hint left the footer"
+        );
+        assert!(
+            !footer.contains(" all "),
+            "bulk window hint left the footer"
+        );
+
+        let overlay: String = help_lines()
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(overlay.contains("Mark the source read"), "M documented");
+        assert!(
+            overlay.contains("Mark the window read (asks y / n)"),
+            "A documented"
+        );
+    }
+
+    #[test]
+    fn help_overlay_renders_all_bindings() {
+        // AC #3: the rendered overlay shows the expected keys + group headings.
+        let mut app = app_with(&[(9, "Hacker News", 2)]);
+        app.show_help = true;
+        let backend = ratatui::backend::TestBackend::new(80, 30);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect();
+        assert!(rendered.contains("Keyboard shortcuts"), "the titled box");
+        for group in ["Navigation", "Reading", "Marking read", "App"] {
+            assert!(rendered.contains(group), "group heading: {group}");
+        }
+        for phrase in [
+            "Mark the article read",
+            "Mark the source read",
+            "Mark the window read",
+            "Toggle this help",
+            "Quit",
+        ] {
+            assert!(rendered.contains(phrase), "binding: {phrase}");
+        }
     }
 
     // --- Auto-refresh (TASK-37) -------------------------------------------
