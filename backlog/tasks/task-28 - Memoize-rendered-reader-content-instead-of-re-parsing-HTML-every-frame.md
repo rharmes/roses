@@ -1,11 +1,11 @@
 ---
 id: TASK-28
 title: Memoize rendered reader content instead of re-parsing HTML every frame
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-07-01 14:37'
-updated_date: '2026-07-01 15:04'
+updated_date: '2026-07-01 15:05'
 labels:
   - perf
   - refactor
@@ -38,3 +38,9 @@ draw_reader calls reader_text() every ~100ms tick, which re-parses the selected 
 <!-- SECTION:NOTES:BEGIN -->
 Added ReaderCache (key: entry_id,width,image_generation; stores built Text + wrapped height) and image_generation:u64 to App, bumped on Msg::Image. draw_reader now calls ensure_reader_cache(), which rebuilds (re-parses HTML) only on a key miss and returns whether it rebuilt; idle frames and scrolling reuse the cache. New test reader_cache_rebuilds_only_on_key_change asserts hit/miss transitions. 88 tests pass, clippy/fmt clean; existing reader render/scroll tests unchanged confirm no visible behavior change.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Memoized the reader render (ReaderCache keyed by entry id, reader width, and an image-generation counter); draw_reader re-parses article HTML only on a key miss, not every ~100ms frame or scroll. No visible behavior change; covered by a hit/miss cache test with existing render/scroll tests unchanged.
+<!-- SECTION:FINAL_SUMMARY:END -->

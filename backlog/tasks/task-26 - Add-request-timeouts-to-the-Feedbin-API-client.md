@@ -1,11 +1,11 @@
 ---
 id: TASK-26
 title: Add request timeouts to the Feedbin API client
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-07-01 14:37'
-updated_date: '2026-07-01 14:57'
+updated_date: '2026-07-01 15:05'
 labels:
   - hardening
   - reliability
@@ -38,3 +38,9 @@ The Feedbin HTTP client in src/feedbin.rs builds a reqwest blocking client with 
 <!-- SECTION:NOTES:BEGIN -->
 feedbin.rs: added CONNECT_TIMEOUT (10s) and REQUEST_TIMEOUT (30s); with_base_url now delegates to with_base_url_and_timeout, which sets .connect_timeout()/.timeout() on the builder. AC#2 test uses a non-responding local TcpListener + a 250ms client timeout (mockito has no response-delay API); asserts the request errors in <750ms with a timeout in the error chain. Verified 10x for flakiness (10/10 pass). All 13 client tests green, clippy clean.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Added 10s connect + 30s overall request timeouts to the Feedbin client (via a with_base_url_and_timeout seam); a hung/half-open connection now errors instead of wedging a spawn_blocking thread. Verified by a deterministic timeout test against a non-responding local socket (10/10 stable) plus the existing client tests.
+<!-- SECTION:FINAL_SUMMARY:END -->

@@ -1,11 +1,11 @@
 ---
 id: TASK-27
 title: Sanitize all feed-derived display strings against terminal-escape injection
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-07-01 14:37'
-updated_date: '2026-07-01 15:00'
+updated_date: '2026-07-01 15:05'
 labels:
   - security
   - hardening
@@ -38,3 +38,9 @@ sanitize() in src/tui.rs strips control characters (defusing escape-sequence inj
 <!-- SECTION:NOTES:BEGIN -->
 Added src/text.rs::strip_control_chars (drops all C0/DEL/C1 controls incl newline/tab for single-line fields) with unit tests. Applied in tui.rs reader header (title, author, podcast_indicator, external_url, permalink, url), draw_articles titles, draw_sources feed names, and selected_url() (browser arg). Also hardened the roses list stdout path (ui.rs format_unread: title, feed, url) per the agreed scope extension. New tui test reader_header_strips_control_characters_from_title_author_and_url. 87 tests pass, clippy clean.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Added text::strip_control_chars and routed every feed-derived display field through it — reader header (title/author/podcast/external_url/permalink/url), article titles, source names, the o-open URL, and the roses list stdout path — closing an ANSI/terminal escape-injection vector. Covered by text.rs unit tests and a reader-header test.
+<!-- SECTION:FINAL_SUMMARY:END -->
