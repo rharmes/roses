@@ -57,6 +57,12 @@ browser = "w3m %s"
 # true for a terminal browser like w3m: roses suspends the TUI, runs it, then
 # restores. false (the default) launches a GUI browser in the background.
 browser_terminal = true
+
+# Background auto-refresh interval, in seconds. Omit (or set 0) to disable it
+# (the default). roses re-fetches quietly on this cadence without disturbing
+# your place — an unchanged unread set is a cheap conditional request. Values
+# below 60 are clamped up to 60s to stay polite to Feedbin.
+refresh_interval_secs = 300
 ```
 
 ## Keyboard shortcuts

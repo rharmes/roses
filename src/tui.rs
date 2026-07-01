@@ -8,7 +8,7 @@
 //! input never blocks; results arrive over a channel drained each tick.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Local};
@@ -447,9 +447,19 @@ impl App {
                 self.pending_ids = loaded.pending_ids;
                 self.in_flight_more = None;
                 self.status = Status::Ready;
-                self.undo_stack.clear();
                 self.notice = None;
-                self.reset_selection();
+                // A reload / background auto-refresh keeps the reader's place:
+                // preserve focus, selection, and scroll by id when the selected
+                // source & article survived; reselect only when they've gone
+                // (TASK-37). Selection is by id, so it "just works" with the new
+                // entries; an initial load (no prior selection) reselects.
+                self.preserve_or_reselect();
+                // Keep the undo stack across a load so a silent auto-refresh
+                // doesn't wipe a recent mark-read's undo (TASK-37); drop only
+                // entries the fresh set re-added, so an undo can't duplicate a
+                // now-present row.
+                let present: HashSet<i64> = self.entries.iter().map(|e| e.id).collect();
+                self.undo_stack.retain(|u| !present.contains(&u.entry.id));
                 self.refill_image_queue();
             }
             Msg::Loaded(Err(err)) => {
@@ -542,6 +552,36 @@ impl App {
         let first_source = self.sources().first().map(|s| s.0);
         self.selected_source = first_source;
         self.selected_article = first_source.and_then(|fid| self.article_ids(fid).first().copied());
+    }
+
+    /// After a reload / auto-refresh, keep the cursor where it was when the
+    /// selected source *and* article still exist — leaving focus and scroll
+    /// untouched so a mid-read isn't disturbed (TASK-37). When the source
+    /// survived but its article didn't (e.g. marked read on another client),
+    /// keep the source, pick its first article, and reset the reader. When the
+    /// source is gone — or nothing was selected yet (initial load) — fall back
+    /// to [`reset_selection`](Self::reset_selection).
+    fn preserve_or_reselect(&mut self) {
+        let source_present = self
+            .selected_source
+            .is_some_and(|fid| self.sources().iter().any(|(id, _)| *id == fid));
+        if !source_present {
+            self.reset_selection();
+            return;
+        }
+        let feed_id = self.selected_source.expect("source is present");
+        let article_present = self
+            .selected_article
+            .is_some_and(|aid| self.article_ids(feed_id).contains(&aid));
+        if !article_present {
+            self.selected_article = self.article_ids(feed_id).first().copied();
+            self.reader_scroll = 0;
+            if self.selected_article.is_none() {
+                self.reset_selection();
+            }
+        }
+        // else: the selected article survived — leave focus, selection, and
+        // reader scroll exactly as they were.
     }
 
     /// Move the cursor up (`-1`) or down (`+1`) within the focused column.
@@ -1547,6 +1587,14 @@ fn stored_validators(store: &Option<Store>) -> Validators {
         .unwrap_or_default()
 }
 
+/// Whether the background auto-refresh timer should fire now: it's enabled, no
+/// fetch is already in flight, and at least the configured interval has elapsed
+/// since the last fetch fired (TASK-37). Pure so the decision is unit-testable
+/// without real time.
+fn should_auto_refresh(interval: Option<Duration>, elapsed: Duration, in_flight: bool) -> bool {
+    matches!(interval, Some(i) if !in_flight && elapsed >= i)
+}
+
 fn spawn_fetch(handle: &Handle, client: Client, tx: UnboundedSender<Msg>, validators: Validators) {
     handle.spawn_blocking(move || match load(&client, &validators) {
         Ok(LoadOutcome::NotModified) => {
@@ -1694,11 +1742,21 @@ pub fn run(client: Client) -> Result<()> {
         .context("building the Tokio runtime")?;
     let handle = runtime.handle().clone();
     let browser_pref = crate::config::load_browser_pref().unwrap_or_default();
+    // Optional background auto-refresh; `None` (unset/zero) leaves it off (TASK-37).
+    let refresh_interval = crate::config::load_refresh_interval().unwrap_or(None);
 
     let (tx, mut rx) = mpsc::unbounded_channel::<Msg>();
 
     let mut terminal = ratatui::init();
-    let result = run_loop(&mut terminal, &handle, &client, &tx, &mut rx, &browser_pref);
+    let result = run_loop(
+        &mut terminal,
+        &handle,
+        &client,
+        &tx,
+        &mut rx,
+        &browser_pref,
+        refresh_interval,
+    );
     ratatui::restore();
     result
 }
@@ -1737,6 +1795,7 @@ fn run_loop(
     tx: &UnboundedSender<Msg>,
     rx: &mut mpsc::UnboundedReceiver<Msg>,
     browser_pref: &BrowserPref,
+    refresh_interval: Option<Duration>,
 ) -> Result<()> {
     let mut app = App::new();
     // Open the offline cache and paint from it immediately (TASK-41); a cache
@@ -1763,6 +1822,12 @@ fn run_loop(
     );
     let mut images_in_flight = 0usize;
     let mut last_selected = None;
+    // Auto-refresh bookkeeping (TASK-37): `last_fetch` is when the most recent
+    // fetch *fired* (initial, manual, or auto) and `fetch_in_flight` guards
+    // against overlapping the next auto-refresh with an outstanding one. The
+    // initial fetch above is in flight, so start guarded.
+    let mut last_fetch = Instant::now();
+    let mut fetch_in_flight = true;
     while !app.should_quit {
         // Advance the spinner every iteration; the loop ticks ~every 100 ms
         // (the `event::poll(TICK)` below), so it animates without input.
@@ -1770,6 +1835,11 @@ fn run_loop(
         while let Ok(msg) = rx.try_recv() {
             if matches!(msg, Msg::Image { .. }) {
                 images_in_flight = images_in_flight.saturating_sub(1);
+            }
+            // A fetch completed (200/error or a 304) — clear the auto-refresh
+            // guard so the next interval can fire (TASK-37).
+            if matches!(msg, Msg::Loaded(_) | Msg::NotModified) {
+                fetch_in_flight = false;
             }
             // Persist network results to the cache before applying them (main-
             // thread store writes; the cache seed above doesn't come via `rx`).
@@ -1802,6 +1872,21 @@ fn run_loop(
             spawn_load_more(handle, client, tx, ids);
         }
 
+        // Background auto-refresh (TASK-37): silently re-fetch on the configured
+        // interval. No `Status::Loading`, so a mid-read isn't disturbed — the
+        // gentle `Msg::Loaded` apply preserves selection/scroll, and an
+        // unchanged unread set 304s to a no-op (TASK-42).
+        if should_auto_refresh(refresh_interval, last_fetch.elapsed(), fetch_in_flight) {
+            spawn_fetch(
+                handle,
+                client.clone(),
+                tx.clone(),
+                stored_validators(&store),
+            );
+            last_fetch = Instant::now();
+            fetch_in_flight = true;
+        }
+
         if event::poll(TICK).context("polling for input")?
             && let Event::Key(key) = event::read().context("reading input")?
             && key.kind == KeyEventKind::Press
@@ -1816,6 +1901,10 @@ fn run_loop(
                         tx.clone(),
                         stored_validators(&store),
                     );
+                    // Reset the auto-refresh timer so it doesn't immediately
+                    // re-fetch on the heels of a manual reload (TASK-37).
+                    last_fetch = Instant::now();
+                    fetch_in_flight = true;
                 }
                 Action::MarkRead => {
                     if let Some((entry, index)) = app.begin_mark_read() {
@@ -2113,6 +2202,137 @@ mod tests {
         assert_eq!(app.sources(), vec![(7, 1)], "Hacker News is gone");
         assert!(matches!(app.focus, Focus::Sources));
         assert_eq!(app.selected_source, Some(7));
+    }
+
+    // --- Auto-refresh (TASK-37) -------------------------------------------
+
+    #[test]
+    fn auto_refresh_predicate_gates_on_interval_and_in_flight() {
+        // Disabled → never fires, however long it's been.
+        assert!(!should_auto_refresh(None, Duration::from_secs(3600), false));
+        // Enabled but not yet due.
+        let interval = Some(Duration::from_secs(60));
+        assert!(!should_auto_refresh(
+            interval,
+            Duration::from_secs(30),
+            false
+        ));
+        // Enabled and due, with no fetch outstanding → fire.
+        assert!(should_auto_refresh(
+            interval,
+            Duration::from_secs(60),
+            false
+        ));
+        assert!(should_auto_refresh(
+            interval,
+            Duration::from_secs(120),
+            false
+        ));
+        // Due, but a fetch is already in flight → hold off.
+        assert!(!should_auto_refresh(
+            interval,
+            Duration::from_secs(120),
+            true
+        ));
+    }
+
+    #[test]
+    fn reload_preserves_selection_and_scroll_when_the_article_survives() {
+        let mut app = app_with(&[(7, "Rust Blog", 3), (9, "Hacker News", 3)]);
+        let ids = app.article_ids(7);
+        app.selected_source = Some(7);
+        app.selected_article = Some(ids[1]);
+        app.focus = Focus::Reader;
+        app.reader_scroll = 5;
+
+        // A reload that returns the identical unread set (e.g. auto-refresh with
+        // changes elsewhere) must not disturb the reader's place.
+        app.apply(Msg::Loaded(Ok(Loaded {
+            entries: app.entries.clone(),
+            feed_titles: app.feed_titles.clone(),
+            total_unread: app.total_unread,
+            pending_ids: Vec::new(),
+        })));
+
+        assert_eq!(app.selected_source, Some(7));
+        assert_eq!(app.selected_article, Some(ids[1]), "selection kept by id");
+        assert_eq!(app.reader_scroll, 5, "scroll kept mid-read");
+        assert!(matches!(app.focus, Focus::Reader), "focus kept");
+    }
+
+    #[test]
+    fn reload_reselects_when_the_selected_article_vanished() {
+        let mut app = app_with(&[(7, "Rust Blog", 3)]);
+        let ids = app.article_ids(7);
+        app.selected_source = Some(7);
+        app.selected_article = Some(ids[1]);
+        app.focus = Focus::Reader;
+        app.reader_scroll = 4;
+
+        // The selected article was read on another client, so it's absent now.
+        let entries: Vec<Entry> = app
+            .entries
+            .iter()
+            .filter(|e| e.id != ids[1])
+            .cloned()
+            .collect();
+        app.apply(Msg::Loaded(Ok(Loaded {
+            entries,
+            feed_titles: app.feed_titles.clone(),
+            total_unread: 2,
+            pending_ids: Vec::new(),
+        })));
+
+        assert_eq!(app.selected_source, Some(7), "source kept");
+        assert_ne!(app.selected_article, Some(ids[1]));
+        assert_eq!(
+            app.selected_article,
+            app.article_ids(7).first().copied(),
+            "falls back to the source's first article"
+        );
+        assert_eq!(
+            app.reader_scroll, 0,
+            "reader reset when the article vanished"
+        );
+    }
+
+    #[test]
+    fn reload_preserves_undo_stack_but_prunes_readded_entries() {
+        let mut app = app_with(&[(9, "Hacker News", 2)]);
+        app.focus_right();
+        let (entry, index) = app.begin_mark_read().unwrap();
+        app.apply(Msg::Write {
+            op: WriteOp::MarkRead,
+            entry: entry.clone(),
+            index,
+            result: Ok(()),
+        });
+        assert_eq!(app.undo_stack.len(), 1);
+
+        // A refresh that doesn't re-add the marked-read entry keeps the undo —
+        // a silent timer must not wipe it (unlike the old reset-on-load).
+        app.apply(Msg::Loaded(Ok(Loaded {
+            entries: app.entries.clone(),
+            feed_titles: app.feed_titles.clone(),
+            total_unread: 1,
+            pending_ids: Vec::new(),
+        })));
+        assert_eq!(app.undo_stack.len(), 1, "undo survived the refresh");
+
+        // But if the server re-added it (marked unread elsewhere), the stale
+        // undo is pruned so a later `u` can't duplicate a now-present row.
+        let mut entries = app.entries.clone();
+        entries.push(entry);
+        app.apply(Msg::Loaded(Ok(Loaded {
+            entries,
+            feed_titles: app.feed_titles.clone(),
+            total_unread: 2,
+            pending_ids: Vec::new(),
+        })));
+        assert!(
+            app.undo_stack.is_empty(),
+            "undo pruned once the entry returned"
+        );
     }
 
     #[test]

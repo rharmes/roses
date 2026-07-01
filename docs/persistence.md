@@ -85,11 +85,12 @@ the `spawn_blocking` pool and only *results* touch the store.
 ## Startup (offline-first)
 
 `connect()` no longer authenticates before the TUI. `run_loop` opens the store,
-seeds `App` from `load_unread(DISPLAY_LIMIT)` for an instant first paint, then the
-background fetch (spawned by `run`) reconciles. A failed refresh **with cached
+seeds `App` from `load_unread(DISPLAY_LIMIT)` for an instant first paint, then
+spawns the first background fetch to reconcile. A failed refresh **with cached
 entries present** keeps the cached view and shows a footer notice instead of a
 `Failed` screen; with nothing cached it's still `Failed`. A store that won't open
-is non-fatal — roses runs without persistence.
+is non-fatal — roses runs without persistence. An optional background auto-refresh
+(TASK-37) re-runs this same reconcile on a configured interval.
 
 ## Testing
 
