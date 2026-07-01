@@ -51,10 +51,12 @@ CI (see [`ci.md`](ci.md)).
 - **macOS binaries are unsigned.** Direct downloads trigger a Gatekeeper prompt
   (right-click → Open, or `xattr -d com.apple.quarantine`). Homebrew is less
   affected. Signing/notarization needs an Apple Developer cert — out of scope.
-- **Linux keychain isn't wired up.** The musl binary builds, but `keyring` has no
-  Linux backend enabled, so a Feedbin login won't persist between runs on Linux.
-  A follow-up could add a Secret-Service backend (needs a running secret service at
-  runtime). macOS uses the native Keychain and works.
+- **Linux login needs a running Secret Service.** The password is stored in the
+  Secret Service via keyring's pure-Rust *zbus* backend (`zbus-secret-service-keyring-store`),
+  so the musl binary links with no C libdbus. A keyring daemon (GNOME Keyring,
+  KWallet, …) must be running and unlocked for the login to persist; a headless box
+  without one falls back to entering credentials each run (a clear error, no panic).
+  macOS uses the native Keychain.
 - **No Windows build** (deliberate; the keyring backend isn't configured for it).
 
 [cargo-dist]: https://github.com/axodotdev/cargo-dist

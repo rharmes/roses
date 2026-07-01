@@ -23,6 +23,31 @@ cargo clippy --all-targets -- -D warnings
 cargo test --locked
 ```
 
+## Linux keychain integration (`linux-keychain` job)
+
+A second job on `ubuntu-latest` exercises the Linux keychain path **end-to-end** against a real
+Secret Service — the one thing `cargo test` can't cover on a headless box or a macOS dev machine.
+The round-trip test (`config::tests::keychain_round_trip_via_secret_service`) is `#[ignore]`d and
+Linux-only, so it never runs in the core job or on a developer's macOS; this job provisions a
+keyring and runs just it:
+
+```sh
+sudo apt-get install -y gnome-keyring dbus
+dbus-run-session -- bash -euo pipefail -c '
+  echo -n "roses-ci" | gnome-keyring-daemon --unlock --components=secrets
+  cargo test --locked -- --ignored keychain_round_trip_via_secret_service
+'
+```
+
+`dbus-run-session` starts a private session bus; `gnome-keyring-daemon --unlock --components=secrets`
+creates/unlocks the login keyring and serves the Secret Service API that the zbus backend
+(`zbus-secret-service-keyring-store`, chosen for Linux in `Cargo.toml`) talks to. The test stores,
+reads back, and deletes a unique-per-run password, proving login actually persists on Linux.
+
+It's a **separate job** on purpose: a keyring/D-Bus hiccup surfaces as a red check without blocking
+the core `lint-and-test` gate. It is intentionally **not** (yet) a required status check for that
+reason — promote it once it has proven stable (add `"linux-keychain"` to the `contexts` list below).
+
 ## Toolchain pinning
 
 The job installs the toolchain pinned in [`rust-toolchain.toml`](../rust-toolchain.toml) —

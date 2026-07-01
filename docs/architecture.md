@@ -272,9 +272,13 @@ redraw.
 - Config dir: `$XDG_CONFIG_HOME/roses` if set & non-empty, else `~/.config/roses` (honored on macOS too).
 - `config.toml` holds non-secret `Settings`: `email`, `browser`, `browser_terminal`. (`.gitignore`s
   `config.toml` defensively.)
-- The **password lives only in the OS keychain** (`keyring`, service `"roses"`, username = email; macOS
-  Keychain via `apple-native-keyring-store`). `login`/`logout` merge settings so non-secret prefs (e.g.
-  the browser) survive a re-login/logout.
+- The **password lives only in the OS keychain** (`keyring`, service `"roses"`, username = email). The
+  backend is **cfg-gated per platform**: macOS uses the native Keychain (`apple-native-keyring-store`),
+  Linux the Secret Service via the pure-Rust *zbus* backend (`zbus-secret-service-keyring-store`, so the
+  static musl build links without a C libdbus dependency). keyring's `v1` feature registers the platform
+  store on first use; when none is reachable (e.g. no Secret Service daemon on Linux) a keychain op fails
+  with a clear, actionable error (`keyring_error()` attaches a hint) rather than panicking. `login`/`logout`
+  merge settings so non-secret prefs (e.g. the browser) survive a re-login/logout.
 
 ## Testing & CI
 
@@ -286,6 +290,9 @@ redraw.
 - CI (`.github/workflows/ci.yml`, job `lint-and-test`): on push + PR, install the pinned toolchain
   (rustfmt + clippy) with cargo caching, then `cargo fmt --all --check`, `cargo clippy --all-targets --
   -D warnings`, `cargo test --locked`. `main` requires the `lint-and-test` check (branch protection).
+  A separate `linux-keychain` job provisions gnome-keyring under `dbus-run-session` and runs the
+  `#[ignore]`d, Linux-only `keychain_round_trip_via_secret_service` test to verify the Secret Service
+  path end-to-end (see [`ci.md`](ci.md)).
 
 ## Dependencies (why)
 
@@ -295,7 +302,7 @@ redraw.
 | `tokio` (`rt`, `sync`) | Current-thread runtime + `spawn_blocking` pool + `mpsc` channel. |
 | `reqwest` 0.13 (`blocking, json, query, rustls`) | Feedbin HTTP client; rustls for painless static builds. |
 | `serde` (derive) + `toml` | Typed Feedbin models + config (de)serialization. |
-| `keyring` 4 (`apple-native-keyring-store`) | OS keychain for the password. |
+| `keyring` 4 (macOS `apple-native-keyring-store`, Linux `zbus-secret-service-keyring-store`) | OS keychain for the password; the pure-Rust zbus Secret Service backend keeps the musl build free of C libdbus. |
 | `rpassword` | Hidden password prompt on first run. |
 | `dirs` | Home directory for the XDG fallback. |
 | `image` (`png, jpeg, gif, webp`) | Decode entry images for half-block rendering. |
