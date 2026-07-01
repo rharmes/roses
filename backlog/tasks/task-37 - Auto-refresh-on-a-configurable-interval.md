@@ -1,11 +1,11 @@
 ---
 id: TASK-37
 title: Auto-refresh on a configurable interval
-status: In Progress
+status: Done
 assignee:
   - '@ross'
 created_date: '2026-07-01 14:38'
-updated_date: '2026-07-01 19:41'
+updated_date: '2026-07-01 20:46'
 labels:
   - feature
 dependencies: []
@@ -41,3 +41,9 @@ Add optional background auto-refresh: re-run the load on a configurable interval
 <!-- SECTION:NOTES:BEGIN -->
 Implemented as a unified gentle Msg::Loaded apply path (no new Msg variant): manual reload and background auto-refresh both preserve selection/scroll/undo by id; auto-refresh is silent (no Status::Loading) and 304s to a no-op when unchanged. Config refresh_interval_secs (seconds, 60s floor, off by default). Per interview: seconds+60s floor, footer notice on failure, preserve undo, and manual reload also made gentle. 108 tests pass (fmt+clippy clean); ran the suite 5x for flakiness — stable.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Shipped as PR #27 (merged). Opt-in refresh_interval_secs config (seconds, off by default, 60s floor) drives a silent timer-based background refresh via a pure should_auto_refresh() predicate. Manual reload + auto-refresh unified into one gentle Msg::Loaded path that preserves focus/selection/scroll and the undo stack by id (reselects only when the read article vanished; prunes re-added undo entries); a 304 is a no-op. Deterministic tests (108 pass, 5x stable); fmt+clippy clean; docs updated in-commit incl. the persistence 'spawned by run'->run_loop fix.
+<!-- SECTION:FINAL_SUMMARY:END -->

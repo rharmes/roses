@@ -69,22 +69,24 @@ enum WriteOp {
     Undo,
 }
 
-/// An entry that was marked read and can be restored, remembering its position
-/// in `entries` so undo can put it back in published order.
+/// A group of entries marked read together and restorable as a unit, each
+/// remembering its position in `entries` so undo can put the batch back in
+/// published order. A single `m` is a batch of one; `M`/`A` are larger batches
+/// (TASK-30), so one undo (`u`) reverses a bulk mark in a single step.
 struct Undone {
-    entry: Entry,
-    index: usize,
+    batch: Vec<(Entry, usize)>,
 }
 
 /// Message from a background worker to the UI loop.
 enum Msg {
     Loaded(Result<Loaded, String>),
-    /// Result of a mark-read / undo write, carrying the entry + index so the UI
-    /// can finalize on success or roll back on failure (TASK-7 AC #4).
+    /// Result of a mark-read / undo write, carrying the batch of entries + their
+    /// indices so the UI can finalize on success or roll back on failure (TASK-7
+    /// AC #4). A single mark is a one-element batch; bulk marks (TASK-30) carry
+    /// the whole set so one undo restores it.
     Write {
         op: WriteOp,
-        entry: Entry,
-        index: usize,
+        batch: Vec<(Entry, usize)>,
         result: Result<(), String>,
     },
     /// Rendered half-block art for an entry image, keyed by its source URL.
@@ -127,8 +129,19 @@ enum Action {
     None,
     Reload,
     MarkRead,
+    /// Mark every loaded article in the selected source read (`M`, TASK-30).
+    MarkSourceRead,
+    /// Mark every loaded article read — the whole window (`A`, TASK-30).
+    MarkWindowRead,
     Undo,
     OpenInBrowser,
+}
+
+/// A pending y/n confirmation shown in the footer, intercepting the next key.
+/// Only the whole-window mark is gated (TASK-30); the source mark is instant.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Confirm {
+    MarkWindowRead,
 }
 
 /// Which column the cursor is in.
@@ -192,6 +205,9 @@ struct App {
     undo_stack: Vec<Undone>,
     /// Transient status line (e.g. a write failure); cleared on the next key.
     notice: Option<String>,
+    /// A pending y/n confirmation shown in the footer; the next key answers it
+    /// (`y` proceeds, anything else cancels) instead of its normal binding.
+    pending_confirm: Option<Confirm>,
     should_quit: bool,
 }
 
@@ -217,6 +233,7 @@ impl App {
             image_generation: 0,
             undo_stack: Vec::new(),
             notice: None,
+            pending_confirm: None,
             should_quit: false,
         }
     }
@@ -459,7 +476,8 @@ impl App {
                 // entries the fresh set re-added, so an undo can't duplicate a
                 // now-present row.
                 let present: HashSet<i64> = self.entries.iter().map(|e| e.id).collect();
-                self.undo_stack.retain(|u| !present.contains(&u.entry.id));
+                self.undo_stack
+                    .retain(|u| !u.batch.iter().any(|(e, _)| present.contains(&e.id)));
                 self.refill_image_queue();
             }
             Msg::Loaded(Err(err)) => {
@@ -474,31 +492,37 @@ impl App {
 
             Msg::Write {
                 op: WriteOp::MarkRead,
-                entry,
-                index,
+                batch,
                 result,
             } => match result {
-                Ok(()) => self.undo_stack.push(Undone { entry, index }),
+                Ok(()) => self.undo_stack.push(Undone { batch }),
                 Err(err) => {
-                    self.reinsert(entry, index);
-                    self.notice = Some(format!("Mark read failed (restored): {err}"));
+                    // Roll the whole batch back into view and offer a retry hint.
+                    let n = batch.len();
+                    self.reinsert_batch(&batch);
+                    self.notice = Some(match n {
+                        1 => format!("Mark read failed (restored): {err}"),
+                        n => format!("Mark {n} read failed (restored): {err}"),
+                    });
                 }
             },
 
             Msg::Write {
                 op: WriteOp::Undo,
-                entry,
-                index,
+                batch,
                 result,
             } => {
                 if let Err(err) = result {
-                    if let Some(pos) = self.entries.iter().position(|e| e.id == entry.id) {
-                        let feed_id = entry.feed_id;
-                        self.entries.remove(pos);
-                        self.total_unread = self.total_unread.saturating_sub(1);
-                        self.reselect_after_removal(feed_id, 0);
+                    // The optimistic re-insert didn't stick server-side; take the
+                    // batch back out, keeping it undoable for a retry.
+                    for (entry, _) in &batch {
+                        if let Some(pos) = self.entries.iter().position(|e| e.id == entry.id) {
+                            self.entries.remove(pos);
+                            self.total_unread = self.total_unread.saturating_sub(1);
+                        }
                     }
-                    self.undo_stack.push(Undone { entry, index });
+                    self.preserve_or_reselect();
+                    self.undo_stack.push(Undone { batch });
                     self.notice = Some(format!("Undo failed (kept read): {err}"));
                 }
             }
@@ -688,8 +712,9 @@ impl App {
     }
 
     /// Optimistically mark the selected article read (only when an article is
-    /// the active target). Returns the removed entry + its index for the write.
-    fn begin_mark_read(&mut self) -> Option<(Entry, usize)> {
+    /// the active target). Returns the removed entry + its index as a one-element
+    /// batch for the write (TASK-30 unified the single and bulk paths).
+    fn begin_mark_read(&mut self) -> Option<Vec<(Entry, usize)>> {
         if self.focus == Focus::Sources {
             return None;
         }
@@ -699,27 +724,79 @@ impl App {
         let entry = self.entries.remove(index);
         self.total_unread = self.total_unread.saturating_sub(1);
         self.reselect_after_removal(entry.feed_id, hint);
-        Some((entry, index))
+        Some(vec![(entry, index)])
     }
 
-    /// Optimistically restore the most recently marked-read entry.
-    fn begin_undo(&mut self) -> Option<(Entry, usize)> {
-        let Undone { entry, index } = self.undo_stack.pop()?;
-        self.reinsert(entry.clone(), index);
-        Some((entry, index))
+    /// Optimistically mark every loaded article in the selected source read
+    /// (`M`, TASK-30). Un-hydrated `pending_ids` for the source stay unread.
+    /// Returns the removed batch for one batched write.
+    fn begin_mark_source_read(&mut self) -> Option<Vec<(Entry, usize)>> {
+        let feed_id = self.selected_source?;
+        let indices: Vec<usize> = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.feed_id == feed_id)
+            .map(|(i, _)| i)
+            .collect();
+        self.remove_batch(indices)
     }
 
-    /// Re-insert an entry near its original index, bump the unread count, and
-    /// focus it in the articles column. Used by undo and mark-read rollback.
-    fn reinsert(&mut self, entry: Entry, index: usize) {
-        let at = index.min(self.entries.len());
-        let (feed_id, id) = (entry.feed_id, entry.id);
-        self.entries.insert(at, entry);
-        self.total_unread = self.total_unread.saturating_add(1);
-        self.selected_source = Some(feed_id);
-        self.selected_article = Some(id);
-        self.focus = Focus::Articles;
-        self.reader_scroll = 0;
+    /// Optimistically mark every loaded article read — the whole window (`A`,
+    /// TASK-30). Scoped to loaded entries; `pending_ids` stay unread and the
+    /// next batch auto-hydrates as usual (`near_tail`).
+    fn begin_mark_window_read(&mut self) -> Option<Vec<(Entry, usize)>> {
+        self.remove_batch((0..self.entries.len()).collect())
+    }
+
+    /// Remove the entries at `indices` as one batch, decrement the unread count,
+    /// and reselect. Returns the `(entry, original index)` pairs in ascending-
+    /// index order (so [`reinsert_batch`](Self::reinsert_batch) can restore them
+    /// exactly), or `None` if the set was empty.
+    fn remove_batch(&mut self, mut indices: Vec<usize>) -> Option<Vec<(Entry, usize)>> {
+        if indices.is_empty() {
+            return None;
+        }
+        indices.sort_unstable();
+        // The source we're clearing, for reselection (arbitrary but harmless for
+        // a whole-window mark, where every source empties anyway).
+        let feed_id = self.entries[indices[0]].feed_id;
+        // Remove back-to-front so earlier indices stay valid, then restore
+        // ascending order for a clean undo.
+        let mut batch: Vec<(Entry, usize)> = indices
+            .iter()
+            .rev()
+            .map(|&i| (self.entries.remove(i), i))
+            .collect();
+        batch.reverse();
+        self.total_unread = self.total_unread.saturating_sub(batch.len());
+        self.reselect_after_removal(feed_id, 0);
+        Some(batch)
+    }
+
+    /// Optimistically restore the most recent undo batch as a unit (`u`). A bulk
+    /// mark restores in one step (TASK-30). Returns the batch for the write.
+    fn begin_undo(&mut self) -> Option<Vec<(Entry, usize)>> {
+        let batch = self.undo_stack.pop()?.batch;
+        self.reinsert_batch(&batch);
+        Some(batch)
+    }
+
+    /// Re-insert a removed batch at its original indices (ascending, so each
+    /// lands correctly as the others fill in), bump the unread count, and focus
+    /// the first restored entry. Shared by undo and mark-read rollback.
+    fn reinsert_batch(&mut self, batch: &[(Entry, usize)]) {
+        for (entry, index) in batch {
+            let at = (*index).min(self.entries.len());
+            self.entries.insert(at, entry.clone());
+            self.total_unread = self.total_unread.saturating_add(1);
+        }
+        if let Some((entry, _)) = batch.first() {
+            self.selected_source = Some(entry.feed_id);
+            self.selected_article = Some(entry.id);
+            self.focus = Focus::Articles;
+            self.reader_scroll = 0;
+        }
     }
 
     /// After removing an article from `feed_id`, pick the next sensible
@@ -742,6 +819,14 @@ impl App {
 
     /// Handle one key press; returns an [`Action`] the run loop must drive.
     fn handle_key(&mut self, code: KeyCode) -> Action {
+        // A pending confirmation swallows the next key (TASK-30): `y`/`Y`
+        // proceeds, anything else (incl. `n`/Esc/navigation) cancels.
+        if let Some(confirm) = self.pending_confirm.take() {
+            return match (confirm, code) {
+                (Confirm::MarkWindowRead, KeyCode::Char('y' | 'Y')) => Action::MarkWindowRead,
+                _ => Action::None,
+            };
+        }
         self.notice = None;
         match code {
             KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
@@ -758,12 +843,29 @@ impl App {
                 self.reader_scroll = self.reader_scroll.saturating_sub(READER_PAGE);
             }
             KeyCode::Char('m') => return Action::MarkRead,
+            KeyCode::Char('M') => return Action::MarkSourceRead,
+            // The big one asks first; no-op if there's nothing loaded to mark.
+            KeyCode::Char('A') => {
+                if !self.entries.is_empty() {
+                    self.pending_confirm = Some(Confirm::MarkWindowRead);
+                }
+            }
             KeyCode::Char('u') => return Action::Undo,
             KeyCode::Char('o') => return Action::OpenInBrowser,
             KeyCode::Char('r') => return Action::Reload,
             _ => {}
         }
         Action::None
+    }
+
+    /// The footer confirmation prompt, if a confirmation is pending (TASK-30).
+    fn confirm_prompt(&self) -> Option<String> {
+        self.pending_confirm.map(|confirm| match confirm {
+            Confirm::MarkWindowRead => format!(
+                "Mark all {} loaded articles read?  y / n",
+                self.entries.len()
+            ),
+        })
     }
 
     // --- rendering ---------------------------------------------------------
@@ -796,21 +898,32 @@ impl App {
             self.draw_reader(frame, reader);
         }
 
-        let footer_line = match &self.notice {
-            Some(text) => Line::from(format!(" {text} ")).red(),
-            None => footer_help(),
+        // A pending confirmation (TASK-30) takes over the footer — accented, not
+        // red — over any notice or the normal help.
+        let footer_line = if let Some(prompt) = self.confirm_prompt() {
+            Line::from(format!(" {prompt} ")).fg(theme::ROSE).bold()
+        } else {
+            match &self.notice {
+                Some(text) => Line::from(format!(" {text} ")).red(),
+                None => footer_help(),
+            }
         };
         // Right-aligned footer slot: the image loading indicator while images are
         // still resolving, otherwise a "showing X of Y unread" hint whenever more
-        // unread entries remain un-hydrated (TASK-40).
-        let right_indicator = match self.image_progress() {
-            Some((done, total)) => Some(loading_indicator(done, total, self.spinner_tick)),
-            None if !self.pending_ids.is_empty() => Some(format!(
-                "↓ {} of {} unread",
-                self.entries.len(),
-                self.total_unread
-            )),
-            None => None,
+        // unread entries remain un-hydrated (TASK-40). Suppressed while a
+        // confirmation prompt owns the footer so it can't crowd the prompt.
+        let right_indicator = if self.pending_confirm.is_some() {
+            None
+        } else {
+            match self.image_progress() {
+                Some((done, total)) => Some(loading_indicator(done, total, self.spinner_tick)),
+                None if !self.pending_ids.is_empty() => Some(format!(
+                    "↓ {} of {} unread",
+                    self.entries.len(),
+                    self.total_unread
+                )),
+                None => None,
+            }
         };
         match right_indicator {
             // Reserve the right columns so the indicator never overlaps the help;
@@ -1045,6 +1158,10 @@ fn footer_help() -> Line<'static> {
         text(" focus · "),
         key("m"),
         text(" read · "),
+        key("M"),
+        text(" src · "),
+        key("A"),
+        text(" all · "),
         key("u"),
         text(" undo · "),
         key("o"),
@@ -1613,29 +1730,27 @@ fn spawn_fetch(handle: &Handle, client: Client, tx: UnboundedSender<Msg>, valida
 
 /// Run a mark-read / undo network write on the blocking pool and report the
 /// outcome — with the entry + index for rollback — back to the UI loop.
+/// Write a batch of unread-state changes in one request (the client batches at
+/// its 1,000-id limit internally) and deliver the result with the batch so the
+/// UI can finalize or roll back as a unit (TASK-30). A one-element batch is the
+/// single `m`/`u` path.
 fn spawn_write(
     handle: &Handle,
     client: &Client,
     tx: &UnboundedSender<Msg>,
     op: WriteOp,
-    entry: Entry,
-    index: usize,
+    batch: Vec<(Entry, usize)>,
 ) {
     let client = client.clone();
     let tx = tx.clone();
-    let id = entry.id;
+    let ids: Vec<i64> = batch.iter().map(|(e, _)| e.id).collect();
     handle.spawn_blocking(move || {
         let net = match op {
-            WriteOp::MarkRead => client.mark_read(&[id]),
-            WriteOp::Undo => client.mark_unread(&[id]),
+            WriteOp::MarkRead => client.mark_read(&ids),
+            WriteOp::Undo => client.mark_unread(&ids),
         };
         let result = net.map(|_| ()).map_err(|e| format!("{e:#}"));
-        let _ = tx.send(Msg::Write {
-            op,
-            entry,
-            index,
-            result,
-        });
+        let _ = tx.send(Msg::Write { op, batch, result });
     });
 }
 
@@ -1681,11 +1796,13 @@ fn persist_msg(store: &mut Store, msg: &Msg) {
         }
         Msg::Write {
             op,
-            entry,
+            batch,
             result: Ok(()),
-            ..
         } => {
-            let _ = store.set_unread(entry.id, matches!(op, WriteOp::Undo));
+            let unread = matches!(op, WriteOp::Undo);
+            for (entry, _) in batch {
+                let _ = store.set_unread(entry.id, unread);
+            }
         }
         // Persist fresh HTTP validators so the next fetch can 304 (TASK-42).
         Msg::Validators(v) => {
@@ -1907,13 +2024,23 @@ fn run_loop(
                     fetch_in_flight = true;
                 }
                 Action::MarkRead => {
-                    if let Some((entry, index)) = app.begin_mark_read() {
-                        spawn_write(handle, client, tx, WriteOp::MarkRead, entry, index);
+                    if let Some(batch) = app.begin_mark_read() {
+                        spawn_write(handle, client, tx, WriteOp::MarkRead, batch);
+                    }
+                }
+                Action::MarkSourceRead => {
+                    if let Some(batch) = app.begin_mark_source_read() {
+                        spawn_write(handle, client, tx, WriteOp::MarkRead, batch);
+                    }
+                }
+                Action::MarkWindowRead => {
+                    if let Some(batch) = app.begin_mark_window_read() {
+                        spawn_write(handle, client, tx, WriteOp::MarkRead, batch);
                     }
                 }
                 Action::Undo => {
-                    if let Some((entry, index)) = app.begin_undo() {
-                        spawn_write(handle, client, tx, WriteOp::Undo, entry, index);
+                    if let Some(batch) = app.begin_undo() {
+                        spawn_write(handle, client, tx, WriteOp::Undo, batch);
                     }
                 }
                 Action::OpenInBrowser => open_selected(terminal, &mut app, browser_pref),
@@ -2153,24 +2280,23 @@ mod tests {
     fn mark_read_success_then_undo_round_trips() {
         let mut app = app_with(&[(9, "Hacker News", 2)]);
         app.focus_right(); // Articles
-        let (entry, index) = app.begin_mark_read().expect("an article is selected");
+        let batch = app.begin_mark_read().expect("an article is selected");
+        assert_eq!(batch.len(), 1, "single mark is a one-element batch");
         assert_eq!(app.article_ids(9).len(), 1);
         assert_eq!(app.total_unread, 1);
         app.apply(Msg::Write {
             op: WriteOp::MarkRead,
-            entry,
-            index,
+            batch,
             result: Ok(()),
         });
         assert_eq!(app.undo_stack.len(), 1);
 
-        let (entry, index) = app.begin_undo().expect("something to undo");
+        let batch = app.begin_undo().expect("something to undo");
         assert_eq!(app.article_ids(9).len(), 2);
         assert_eq!(app.total_unread, 2);
         app.apply(Msg::Write {
             op: WriteOp::Undo,
-            entry,
-            index,
+            batch,
             result: Ok(()),
         });
         assert_eq!(app.article_ids(9).len(), 2);
@@ -2180,12 +2306,11 @@ mod tests {
     fn mark_read_failure_rolls_back() {
         let mut app = app_with(&[(9, "Hacker News", 2)]);
         app.focus_right();
-        let (entry, index) = app.begin_mark_read().unwrap();
+        let batch = app.begin_mark_read().unwrap();
         assert_eq!(app.article_ids(9).len(), 1);
         app.apply(Msg::Write {
             op: WriteOp::MarkRead,
-            entry,
-            index,
+            batch,
             result: Err("boom".to_string()),
         });
         assert_eq!(app.article_ids(9).len(), 2, "rolled back");
@@ -2202,6 +2327,149 @@ mod tests {
         assert_eq!(app.sources(), vec![(7, 1)], "Hacker News is gone");
         assert!(matches!(app.focus, Focus::Sources));
         assert_eq!(app.selected_source, Some(7));
+    }
+
+    // --- Bulk mark-read (TASK-30) -----------------------------------------
+
+    #[test]
+    fn mark_source_read_batches_every_loaded_article_in_the_source() {
+        let mut app = app_with(&[(9, "Hacker News", 3), (7, "Rust Blog", 2)]);
+        // reset_selection focuses the first source by name — Hacker News (9).
+        assert_eq!(app.selected_source, Some(9));
+        let want: Vec<i64> = app.article_ids(9); // the batch should carry exactly these
+        let batch = app.begin_mark_source_read().expect("a source is selected");
+        let got: Vec<i64> = batch.iter().map(|(e, _)| e.id).collect();
+        let mut got_sorted = got.clone();
+        let mut want_sorted = want.clone();
+        got_sorted.sort_unstable();
+        want_sorted.sort_unstable();
+        assert_eq!(
+            got_sorted, want_sorted,
+            "one batched write covers the source"
+        );
+        assert!(app.articles(9).is_empty(), "source cleared optimistically");
+        assert_eq!(app.sources(), vec![(7, 2)], "only Rust Blog remains");
+        assert_eq!(app.total_unread, 2, "3 of 5 removed");
+        assert!(matches!(app.focus, Focus::Sources));
+    }
+
+    #[test]
+    fn mark_source_read_works_from_sources_focus() {
+        // Unlike single `m`, `M` operates on the selected source regardless of
+        // focus (you're pointing at it in the left column).
+        let mut app = app_with(&[(9, "Hacker News", 2)]);
+        assert!(matches!(app.focus, Focus::Sources));
+        let batch = app.begin_mark_source_read().expect("source selected");
+        assert_eq!(batch.len(), 2);
+    }
+
+    #[test]
+    fn mark_source_read_undo_restores_the_whole_source_in_order() {
+        let mut app = app_with(&[(9, "Hacker News", 3)]);
+        let before = app.article_ids(9);
+        let batch = app.begin_mark_source_read().unwrap();
+        app.apply(Msg::Write {
+            op: WriteOp::MarkRead,
+            batch,
+            result: Ok(()),
+        });
+        assert_eq!(app.undo_stack.len(), 1, "one undo entry for the batch");
+        assert!(app.articles(9).is_empty());
+
+        let batch = app.begin_undo().expect("the batch is undoable");
+        assert_eq!(batch.len(), 3, "undo restores the whole batch at once");
+        assert_eq!(app.article_ids(9), before, "order preserved after undo");
+        assert_eq!(app.total_unread, 3);
+    }
+
+    #[test]
+    fn mark_source_read_failure_rolls_back_the_batch() {
+        let mut app = app_with(&[(9, "Hacker News", 3), (7, "Rust Blog", 1)]);
+        let before = app.article_ids(9);
+        let batch = app.begin_mark_source_read().unwrap();
+        assert!(app.articles(9).is_empty());
+        app.apply(Msg::Write {
+            op: WriteOp::MarkRead,
+            batch,
+            result: Err("boom".to_string()),
+        });
+        assert_eq!(
+            app.article_ids(9),
+            before,
+            "whole batch rolled back in order"
+        );
+        assert_eq!(app.total_unread, 4);
+        assert!(app.notice.is_some());
+    }
+
+    #[test]
+    fn mark_window_read_clears_loaded_only_and_keeps_pending() {
+        let mut app = app_with(&[(9, "Hacker News", 2)]);
+        // Simulate more unread than are hydrated: 2 loaded + 2 pending.
+        app.pending_ids = vec![200, 201];
+        app.total_unread = 4;
+        let batch = app
+            .begin_mark_window_read()
+            .expect("the window has entries");
+        assert_eq!(batch.len(), 2, "only the loaded window is marked");
+        assert!(app.entries.is_empty(), "window cleared");
+        assert_eq!(app.total_unread, 2, "the pending ids stay unread");
+        assert_eq!(app.pending_ids, vec![200, 201], "pending ids untouched");
+        assert_eq!(app.selected_source, None, "nothing selected once empty");
+
+        // Undo restores the whole loaded window as a unit.
+        app.apply(Msg::Write {
+            op: WriteOp::MarkRead,
+            batch,
+            result: Ok(()),
+        });
+        let batch = app.begin_undo().expect("the window is undoable");
+        assert_eq!(batch.len(), 2);
+        assert_eq!(app.entries.len(), 2, "window restored");
+        assert_eq!(app.total_unread, 4);
+    }
+
+    #[test]
+    fn mark_window_read_is_gated_by_a_confirmation() {
+        let mut app = app_with(&[(9, "Hacker News", 2)]);
+        // `A` arms a confirmation but takes no action yet.
+        assert!(matches!(app.handle_key(KeyCode::Char('A')), Action::None));
+        assert!(app.pending_confirm.is_some(), "confirmation armed");
+        assert!(
+            app.confirm_prompt().is_some_and(|p| p.contains('2')),
+            "prompt names the loaded count"
+        );
+        // `y` confirms and consumes the pending state, yielding the bulk action.
+        assert!(matches!(
+            app.handle_key(KeyCode::Char('y')),
+            Action::MarkWindowRead
+        ));
+        assert!(app.pending_confirm.is_none(), "confirmation consumed");
+    }
+
+    #[test]
+    fn mark_window_confirmation_cancels_on_anything_but_yes() {
+        let mut app = app_with(&[(9, "Hacker News", 2)]);
+        let _ = app.handle_key(KeyCode::Char('A'));
+        assert!(app.pending_confirm.is_some());
+        // `n` (or any non-`y` key) cancels without marking.
+        assert!(matches!(app.handle_key(KeyCode::Char('n')), Action::None));
+        assert!(app.pending_confirm.is_none(), "cancelled");
+        assert_eq!(app.entries.len(), 2, "nothing was marked");
+    }
+
+    #[test]
+    fn mark_window_read_needs_something_loaded_to_confirm() {
+        let mut app = App::new();
+        app.apply(Msg::Loaded(Ok(Loaded {
+            entries: vec![],
+            feed_titles: HashMap::new(),
+            total_unread: 0,
+            pending_ids: Vec::new(),
+        })));
+        // `A` with an empty window arms nothing (no prompt, no action).
+        assert!(matches!(app.handle_key(KeyCode::Char('A')), Action::None));
+        assert!(app.pending_confirm.is_none());
     }
 
     // --- Auto-refresh (TASK-37) -------------------------------------------
@@ -2300,11 +2568,11 @@ mod tests {
     fn reload_preserves_undo_stack_but_prunes_readded_entries() {
         let mut app = app_with(&[(9, "Hacker News", 2)]);
         app.focus_right();
-        let (entry, index) = app.begin_mark_read().unwrap();
+        let batch = app.begin_mark_read().unwrap();
+        let entry = batch[0].0.clone();
         app.apply(Msg::Write {
             op: WriteOp::MarkRead,
-            entry: entry.clone(),
-            index,
+            batch,
             result: Ok(()),
         });
         assert_eq!(app.undo_stack.len(), 1);
