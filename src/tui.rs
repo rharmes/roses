@@ -119,6 +119,16 @@ enum Status {
     Failed(String),
 }
 
+/// A memoized reader render (TASK-28), valid while its `key` is unchanged — so a
+/// static article isn't re-parsed from HTML on every ~100ms frame or scroll.
+struct ReaderCache {
+    /// `(selected entry id, reader inner width, image generation)`.
+    key: (i64, u16, u64),
+    text: Text<'static>,
+    /// Wrapped height at `key.1` width, for the scroll clamp + scrollbar.
+    wrapped: u16,
+}
+
 struct App {
     status: Status,
     /// All loaded unread entries, newest first.
@@ -141,6 +151,11 @@ struct App {
     spinner_tick: usize,
     /// Inner width of the reader pane from the last draw, used to size images.
     reader_width: u16,
+    /// Memoized reader render (TASK-28); rebuilt only when its key changes.
+    reader_cache: Option<ReaderCache>,
+    /// Bumped whenever an image resolves, so the reader cache invalidates when a
+    /// visible image finishes loading (keys the cache on image state cheaply).
+    image_generation: u64,
     /// Marked-read entries that can be restored, most recent last.
     undo_stack: Vec<Undone>,
     /// Transient status line (e.g. a write failure); cleared on the next key.
@@ -164,6 +179,8 @@ impl App {
             image_urls: Vec::new(),
             spinner_tick: 0,
             reader_width: 0,
+            reader_cache: None,
+            image_generation: 0,
             undo_stack: Vec::new(),
             notice: None,
             should_quit: false,
@@ -408,6 +425,9 @@ impl App {
                     Err(_) => ImageState::Failed,
                 };
                 self.images.insert(url, state);
+                // Invalidate the reader cache: the currently-shown article may
+                // include this image, so its render can change (TASK-28).
+                self.image_generation = self.image_generation.wrapping_add(1);
             }
         }
     }
@@ -766,16 +786,36 @@ impl App {
         frame.render_stateful_widget(list, area, &mut state);
     }
 
+    /// Ensure `reader_cache` holds the render for `entry_id` at `width`,
+    /// rebuilding (re-parsing the article HTML) only on a key miss. Returns
+    /// whether it rebuilt. The key folds in `image_generation`, so the cache
+    /// invalidates when a visible image finishes loading (TASK-28).
+    fn ensure_reader_cache(&mut self, entry_id: i64, width: u16) -> bool {
+        let key = (entry_id, width, self.image_generation);
+        if self.reader_cache.as_ref().map(|c| c.key) == Some(key) {
+            return false;
+        }
+        let Some(entry) = self.entries.iter().find(|e| e.id == entry_id) else {
+            return false;
+        };
+        let text = reader_text(entry, &self.images, width);
+        let wrapped = Paragraph::new(text.clone())
+            .wrap(Wrap { trim: false })
+            .line_count(width) as u16;
+        self.reader_cache = Some(ReaderCache { key, text, wrapped });
+        true
+    }
+
     fn draw_reader(&mut self, frame: &mut Frame, area: Rect) {
         let focused = self.focus == Focus::Reader;
         let block = self.column_block("Reader", focused);
         // The reader shows the article only when focus has moved off the
         // sources column (TASK-11: a focused source shows nothing here).
-        let entry = match self.focus {
+        let entry_id = match self.focus {
             Focus::Sources => None,
-            Focus::Articles | Focus::Reader => self.selected_article_entry(),
+            Focus::Articles | Focus::Reader => self.selected_article,
         };
-        let Some(entry) = entry else {
+        let Some(entry_id) = entry_id.filter(|id| self.entries.iter().any(|e| e.id == *id)) else {
             frame.render_widget(Paragraph::new("").block(block), area);
             return;
         };
@@ -786,18 +826,20 @@ impl App {
         let inner_width = inner.width;
         let inner_height = inner.height;
 
-        // Pass the inner width so image art is clipped to the current content
-        // width — stale-width art (after a resize) then can't wrap into the
-        // half-height fragment rows it otherwise would.
-        let text = reader_text(entry, &self.images, inner_width);
+        // Rebuild the reader Text only when the article, width, or image state
+        // changed; otherwise reuse the memoized render, so scrolling and idle
+        // frames don't re-parse the article HTML (TASK-28). `reader_text` clips
+        // image art to `inner_width` so stale-width art can't wrap into
+        // half-height fragment rows after a resize.
+        self.ensure_reader_cache(entry_id, inner_width);
+        let (text, wrapped) = {
+            let cache = self.reader_cache.as_ref().expect("cache populated above");
+            (cache.text.clone(), cache.wrapped)
+        };
 
         // Clamp scroll to the *wrapped* height (not the raw line count): one long
         // paragraph is a single line that word-wraps to many rows, so clamping on
-        // `text.lines.len()` would pin the reader at the top. Measure without the
-        // block so `inner_width` is the true content width.
-        let wrapped = Paragraph::new(text.clone())
-            .wrap(Wrap { trim: false })
-            .line_count(inner_width) as u16;
+        // `text.lines.len()` would pin the reader at the top.
         let max_scroll = wrapped.saturating_sub(inner_height);
         self.reader_scroll = self.reader_scroll.min(max_scroll);
 
@@ -2073,6 +2115,37 @@ mod tests {
         assert!(
             rendered.contains("https://example.com/path"),
             "visible url kept: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn reader_cache_rebuilds_only_on_key_change() {
+        // TASK-28: the reader render is memoized by (entry, width, image gen);
+        // idle frames and scrolling reuse it instead of re-parsing the HTML.
+        let mut app = App::new();
+        app.status = Status::Ready;
+        app.entries = vec![entry(1, 7, "Title", Some("<p>Body text here.</p>"))];
+        app.selected_source = Some(7);
+        app.selected_article = Some(1);
+
+        assert!(app.ensure_reader_cache(1, 40), "first build is a miss");
+        assert!(
+            !app.ensure_reader_cache(1, 40),
+            "an identical key reuses the cache (no re-parse on idle/scroll)"
+        );
+        app.image_generation += 1;
+        assert!(
+            app.ensure_reader_cache(1, 40),
+            "an image resolving invalidates the cache"
+        );
+        assert!(!app.ensure_reader_cache(1, 40), "then stable again");
+        assert!(
+            app.ensure_reader_cache(1, 60),
+            "a width change invalidates the cache"
+        );
+        assert!(
+            !app.ensure_reader_cache(2, 60),
+            "an unknown entry id doesn't rebuild (guarded before draw)"
         );
     }
 
