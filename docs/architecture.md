@@ -52,7 +52,9 @@ is reused unchanged; the UI stays responsive by offloading every network/decode 
   2. `terminal.draw(|f| app.draw(f))` — redraw the whole UI from `App` state.
   3. If the selected article changed, `app.prioritize_selected_images()` (bump its queued images).
   4. Drain the image pre-fetch queue up to `MAX_IMAGE_FETCHES` (6) concurrent.
-  5. `event::poll(TICK)` (100 ms) for input; on a key press, `app.handle_key()` returns an `Action`
+  5. If the selection nears the oldest loaded entry and un-hydrated unread ids remain,
+     `maybe_begin_load_more()` drains the next batch and `spawn_load_more` hydrates it (TASK-40).
+  6. `event::poll(TICK)` (100 ms) for input; on a key press, `app.handle_key()` returns an `Action`
      the loop executes (spawning background work).
 - Background work runs via `handle.spawn_blocking(...)`, which executes the **blocking** client/decoder
   on a pool thread and `tx.send(Msg::…)`s the result. The closures own `Client` clones (cheap — the
@@ -63,8 +65,14 @@ So `App` is only ever touched on the main thread; background threads communicate
 
 ### Background tasks (`spawn_*`)
 
-- `spawn_fetch` → `load(client)`: `unread_entry_ids()` → sort desc, take newest `DISPLAY_LIMIT` (50) →
-  `feed_titles()` → `entries(&sample)` → sort by `published` desc → `Msg::Loaded`.
+- `spawn_fetch` → `load(client)`: `unread_entry_ids()` → sort desc, hydrate newest `DISPLAY_LIMIT` (50)
+  via `feed_titles()` + `entries(&sample)` → sort by `published` desc → `Msg::Loaded`; the remaining ids
+  ride along as `pending_ids` for lazy hydration (TASK-40).
+- `spawn_load_more` → `entries(&ids)` for the next `LOAD_MORE_BATCH` (100) pending ids → `Msg::LoadedMore`
+  (appended then re-sorted by `published`). **Pagination is hydrate-on-demand:** `unread_entries.json`
+  already returns the *complete* unread id list, so roses just hydrates more of it as the reader nears the
+  end — no Links-header paging needed. A single `in_flight_more` guard prevents overlapping batches and
+  restores the ids on failure for retry.
 - `spawn_write` → `client.mark_read`/`mark_unread` for one entry → `Msg::Write { op, entry, index, result }`.
 - `spawn_image` → `images::fetch_and_render(url, max_cols)` → `Msg::Image { url, result }`.
 

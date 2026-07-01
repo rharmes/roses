@@ -40,8 +40,10 @@ Only `feed_id: i64` + `title: Option<String>` are deserialized; used solely to b
 
 ### Unread state
 
-Feedbin's `unread_entries` endpoint is the **source of truth**: a flat `Vec<i64>` of unread entry ids.
-roses loads the newest `DISPLAY_LIMIT` (50) of them and hydrates those into `Entry`s.
+Feedbin's `unread_entries` endpoint is the **source of truth**: a flat `Vec<i64>` of *all* unread entry
+ids (unpaginated). roses hydrates the newest `DISPLAY_LIMIT` (50) into `Entry`s immediately and keeps the
+rest as `App.pending_ids`, hydrating the next `LOAD_MORE_BATCH` (100) on demand as the reader nears the
+end (TASK-40) — so every unread entry is reachable without a separate paging endpoint.
 
 ## Ordering invariants
 
@@ -57,7 +59,9 @@ roses loads the newest `DISPLAY_LIMIT` (50) of them and hydrates those into `Ent
 | `status` | `Status` | `Loading` / `Ready` / `Failed(String)`. |
 | `entries` | `Vec<Entry>` | All loaded unread entries, newest-first. |
 | `feed_titles` | `HashMap<i64, String>` | `feed_id` → display name. |
-| `total_unread` | `usize` | Server's full unread count (for "showing X of Y"); adjusted on mark/undo. |
+| `total_unread` | `usize` | Server's full unread count (for "showing X of Y"); adjusted on mark/undo. Invariant: `total_unread == entries.len() + pending_ids.len()` (plus any in-flight batch). |
+| `pending_ids` | `Vec<i64>` | Unread ids not yet hydrated, newest-first; the next `LOAD_MORE_BATCH` is drained on demand (TASK-40). |
+| `in_flight_more` | `Option<Vec<i64>>` | The batch a background load-more is hydrating — concurrency guard + retry buffer (restored to `pending_ids` on failure). |
 | `focus` | `Focus` | Which column the cursor is in. |
 | `selected_source` | `Option<i64>` | Selected **feed_id** (selection by id, not index). |
 | `selected_article` | `Option<i64>` | Selected **entry id**. |
@@ -67,6 +71,8 @@ roses loads the newest `DISPLAY_LIMIT` (50) of them and hydrates those into `Ent
 | `image_urls` | `Vec<String>` | Every distinct image URL of the current load, in on-screen order; drives the `Loading N of M` count. |
 | `spinner_tick` | `usize` | Loading-spinner animation frame, advanced once per UI tick. |
 | `reader_width` | `u16` | Reader inner width from the last draw; sizes pre-fetched art. |
+| `reader_cache` | `Option<ReaderCache>` | Memoized reader render, keyed by `(entry id, width, image_generation)`; rebuilt only on a key miss (TASK-28). |
+| `image_generation` | `u64` | Bumped whenever an image resolves, so the reader cache invalidates when a visible image finishes (TASK-28). |
 | `undo_stack` | `Vec<Undone>` | Marked-read entries that can be restored (most recent last). |
 | `notice` | `Option<String>` | Transient footer message (e.g. a write failure); cleared on next key. |
 | `should_quit` | `bool` | Set by `q`/`Esc`. |
@@ -79,11 +85,13 @@ recomputed from the ids each frame (`source_index`, `article_index`).
 
 - `Focus { Sources, Articles, Reader }` — the single cursor's column.
 - `Status { Loading, Ready, Failed(String) }`.
-- `Loaded { entries, feed_titles, total_unread }` — payload of a successful fetch.
+- `Loaded { entries, feed_titles, total_unread, pending_ids }` — payload of a successful fetch (TASK-40).
+- `ReaderCache { key: (i64, u16, u64), text: Text, wrapped: u16 }` — memoized reader render (TASK-28).
 - `Msg` — background-worker → UI-loop messages:
   - `Loaded(Result<Loaded, String>)`
   - `Write { op: WriteOp, entry: Entry, index: usize, result: Result<(), String> }`
   - `Image { url: String, result: Result<Vec<Line<'static>>, String> }`
+  - `LoadedMore(Result<Vec<Entry>, String>)` — a lazily-hydrated older batch to append (TASK-40).
 - `WriteOp { MarkRead, Undo }` — which unread-state write a `spawn_write` performed.
 - `Undone { entry: Entry, index: usize }` — an undoable mark-read (entry + its position in `entries`).
 - `Action { None, Reload, MarkRead, Undo, OpenInBrowser }` — what a keypress asks the loop to do.

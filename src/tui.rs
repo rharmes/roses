@@ -31,8 +31,15 @@ use crate::feedbin::{Client, Enclosure, Entry};
 use crate::text::strip_control_chars;
 use crate::theme;
 
-/// How many of the newest unread entries to load.
+/// How many of the newest unread entries to hydrate on the initial load.
 const DISPLAY_LIMIT: usize = 50;
+/// How many more unread entries to hydrate per lazy load-more batch — one
+/// `entries` request (TASK-40).
+const LOAD_MORE_BATCH: usize = 100;
+/// Begin hydrating the next batch once the selection is within this many entries
+/// of the oldest loaded one, so more arrive before the user reaches the end
+/// (TASK-40).
+const LOAD_MORE_THRESHOLD: usize = 15;
 /// Lines the reader scrolls per PageUp/PageDown.
 const READER_PAGE: u16 = 10;
 /// Lines the reader scrolls per ↑/↓ (a few at a time, so holding the key moves at
@@ -49,6 +56,9 @@ struct Loaded {
     entries: Vec<Entry>,
     feed_titles: HashMap<i64, String>,
     total_unread: usize,
+    /// Unread ids beyond the initially-hydrated window, newest-first — hydrated
+    /// on demand as the user reads toward the end (TASK-40).
+    pending_ids: Vec<i64>,
 }
 
 /// Which unread-state write a background task performed.
@@ -81,6 +91,8 @@ enum Msg {
         url: String,
         result: Result<Vec<Line<'static>>, String>,
     },
+    /// A lazily-hydrated batch of older unread entries to append (TASK-40).
+    LoadedMore(Result<Vec<Entry>, String>),
 }
 
 /// Cache state for one entry image (TASK-8).
@@ -135,6 +147,12 @@ struct App {
     entries: Vec<Entry>,
     feed_titles: HashMap<i64, String>,
     total_unread: usize,
+    /// Unread ids not yet hydrated, newest-first; drained a batch at a time as
+    /// the user reads toward the end (TASK-40).
+    pending_ids: Vec<i64>,
+    /// The batch currently being hydrated by a background load-more, if any —
+    /// both a concurrency guard and a retry buffer (restored on failure).
+    in_flight_more: Option<Vec<i64>>,
     focus: Focus,
     /// Selection is tracked by id, not index, so it survives mark/undo edits.
     selected_source: Option<i64>,
@@ -170,6 +188,8 @@ impl App {
             entries: Vec::new(),
             feed_titles: HashMap::new(),
             total_unread: 0,
+            pending_ids: Vec::new(),
+            in_flight_more: None,
             focus: Focus::Sources,
             selected_source: None,
             selected_article: None,
@@ -372,6 +392,36 @@ impl App {
             .position(|&id| id == article)
     }
 
+    /// True when the selection is within `LOAD_MORE_THRESHOLD` of the oldest
+    /// loaded entry (in the newest-first `entries` order) and there are still
+    /// un-hydrated unread ids — the cue to fetch the next batch (TASK-40). With
+    /// no selection (e.g. everything nearby was read), a near-empty list also
+    /// qualifies so reading never dead-ends while more remain.
+    fn near_tail(&self) -> bool {
+        if self.pending_ids.is_empty() {
+            return false;
+        }
+        match self
+            .selected_article
+            .and_then(|id| self.entries.iter().position(|e| e.id == id))
+        {
+            Some(idx) => idx + LOAD_MORE_THRESHOLD >= self.entries.len(),
+            None => self.entries.len() <= LOAD_MORE_THRESHOLD,
+        }
+    }
+
+    /// If a load-more is warranted and none is in flight, drain the next batch of
+    /// pending ids into `in_flight_more` and return them for hydration (TASK-40).
+    fn maybe_begin_load_more(&mut self) -> Option<Vec<i64>> {
+        if self.in_flight_more.is_some() || !self.near_tail() {
+            return None;
+        }
+        let n = self.pending_ids.len().min(LOAD_MORE_BATCH);
+        let batch: Vec<i64> = self.pending_ids.drain(..n).collect();
+        self.in_flight_more = Some(batch.clone());
+        Some(batch)
+    }
+
     // --- state updates -----------------------------------------------------
 
     fn apply(&mut self, msg: Msg) {
@@ -380,6 +430,8 @@ impl App {
                 self.entries = loaded.entries;
                 self.feed_titles = loaded.feed_titles;
                 self.total_unread = loaded.total_unread;
+                self.pending_ids = loaded.pending_ids;
+                self.in_flight_more = None;
                 self.status = Status::Ready;
                 self.undo_stack.clear();
                 self.notice = None;
@@ -428,6 +480,24 @@ impl App {
                 // Invalidate the reader cache: the currently-shown article may
                 // include this image, so its render can change (TASK-28).
                 self.image_generation = self.image_generation.wrapping_add(1);
+            }
+
+            Msg::LoadedMore(Ok(mut more)) => {
+                // Append the older batch and re-sort so the newest-first
+                // invariant holds; selection is by id, so it survives (TASK-40).
+                self.entries.append(&mut more);
+                self.entries.sort_by(|a, b| b.published.cmp(&a.published));
+                self.in_flight_more = None;
+                self.refill_image_queue();
+            }
+            Msg::LoadedMore(Err(err)) => {
+                // Restore the in-flight batch to the front of pending_ids (in
+                // original order) so it can be retried, and surface a notice.
+                if let Some(mut batch) = self.in_flight_more.take() {
+                    batch.append(&mut self.pending_ids);
+                    self.pending_ids = batch;
+                }
+                self.notice = Some(format!("Load more failed (will retry): {err}"));
             }
         }
     }
@@ -657,11 +727,22 @@ impl App {
             Some(text) => Line::from(format!(" {text} ")).red(),
             None => footer_help(),
         };
-        match self.image_progress() {
-            // Reserve the right columns for the loading indicator so it never
-            // overlaps the help; the help side flexes and truncates if narrow.
-            Some((done, total)) => {
-                let indicator = loading_indicator(done, total, self.spinner_tick);
+        // Right-aligned footer slot: the image loading indicator while images are
+        // still resolving, otherwise a "showing X of Y unread" hint whenever more
+        // unread entries remain un-hydrated (TASK-40).
+        let right_indicator = match self.image_progress() {
+            Some((done, total)) => Some(loading_indicator(done, total, self.spinner_tick)),
+            None if !self.pending_ids.is_empty() => Some(format!(
+                "↓ {} of {} unread",
+                self.entries.len(),
+                self.total_unread
+            )),
+            None => None,
+        };
+        match right_indicator {
+            // Reserve the right columns so the indicator never overlaps the help;
+            // the help side flexes and truncates if narrow.
+            Some(indicator) => {
                 let width = indicator.chars().count() as u16 + 1;
                 let [help_area, indicator_area] =
                     Layout::horizontal([Constraint::Min(0), Constraint::Length(width)])
@@ -1468,17 +1549,32 @@ fn spawn_image(handle: &Handle, tx: &UnboundedSender<Msg>, url: String, max_cols
     });
 }
 
+/// Hydrate a batch of older unread entries on the blocking pool and deliver them
+/// to be appended to the loaded set (TASK-40).
+fn spawn_load_more(handle: &Handle, client: &Client, tx: &UnboundedSender<Msg>, ids: Vec<i64>) {
+    let client = client.clone();
+    let tx = tx.clone();
+    handle.spawn_blocking(move || {
+        let result = client.entries(&ids).map_err(|e| format!("{e:#}"));
+        let _ = tx.send(Msg::LoadedMore(result));
+    });
+}
+
 /// Blocking fetch of the newest unread entries plus their feed names.
 fn load(client: &Client) -> Result<Loaded> {
     let mut unread = client.unread_entry_ids()?;
     let total_unread = unread.len();
     unread.sort_unstable_by(|a, b| b.cmp(a));
-    let sample: Vec<i64> = unread.into_iter().take(DISPLAY_LIMIT).collect();
+    // Hydrate the newest window now; keep the rest as pending ids to hydrate on
+    // demand as the user reads toward the end (TASK-40).
+    let pending_ids: Vec<i64> = unread.split_off(unread.len().min(DISPLAY_LIMIT));
+    let sample = unread;
     if sample.is_empty() {
         return Ok(Loaded {
             entries: Vec::new(),
             feed_titles: HashMap::new(),
             total_unread,
+            pending_ids,
         });
     }
     let feed_titles = client.feed_titles()?;
@@ -1488,6 +1584,7 @@ fn load(client: &Client) -> Result<Loaded> {
         entries,
         feed_titles,
         total_unread,
+        pending_ids,
     })
 }
 
@@ -1573,6 +1670,12 @@ fn run_loop(
             };
             images_in_flight += 1;
             spawn_image(handle, tx, url, app.reader_width.max(1));
+        }
+
+        // Lazily hydrate the next batch of unread as the user nears the end
+        // (TASK-40); the guard inside prevents overlapping loads.
+        if let Some(ids) = app.maybe_begin_load_more() {
+            spawn_load_more(handle, client, tx, ids);
         }
 
         if event::poll(TICK).context("polling for input")?
@@ -1695,6 +1798,7 @@ mod tests {
             entries,
             feed_titles,
             total_unread,
+            pending_ids: Vec::new(),
         })));
         app
     }
@@ -1735,6 +1839,7 @@ mod tests {
             entries,
             feed_titles,
             total_unread: 3,
+            pending_ids: Vec::new(),
         })));
         // The articles column shows oldest (id 1) at the top, newest (id 3) last.
         assert_eq!(app.article_ids(9), vec![1, 2, 3]);
@@ -2150,6 +2255,92 @@ mod tests {
     }
 
     #[test]
+    fn load_more_hydrates_next_batch_and_preserves_selection() {
+        // TASK-40: nearing the oldest loaded entry drains the next batch of
+        // pending ids; the hydrated batch is appended without disturbing the
+        // (id-tracked) selection or the unread total.
+        let mut app = App::new();
+        app.status = Status::Ready;
+        app.entries = vec![
+            entry(5, 7, "E5", None),
+            entry(4, 7, "E4", None),
+            entry(3, 7, "E3", None),
+        ];
+        app.feed_titles.insert(7, "Feed".to_string());
+        app.total_unread = 5;
+        app.pending_ids = vec![2, 1];
+        app.selected_source = Some(7);
+        app.selected_article = Some(3);
+
+        let batch = app
+            .maybe_begin_load_more()
+            .expect("nearing the end starts a load");
+        assert_eq!(batch, vec![2, 1], "drains the next pending ids in order");
+        assert!(
+            app.pending_ids.is_empty(),
+            "pending drained while in flight"
+        );
+        assert!(app.in_flight_more.is_some(), "guard set");
+
+        app.apply(Msg::LoadedMore(Ok(vec![
+            entry(2, 7, "E2", None),
+            entry(1, 7, "E1", None),
+        ])));
+        assert_eq!(app.entries.len(), 5, "batch appended");
+        assert!(app.in_flight_more.is_none(), "guard cleared");
+        assert_eq!(app.selected_article, Some(3), "selection preserved by id");
+        assert_eq!(
+            app.total_unread, 5,
+            "load-more leaves the unread total alone"
+        );
+    }
+
+    #[test]
+    fn load_more_guards_and_stops_when_exhausted() {
+        let mut app = App::new();
+        app.status = Status::Ready;
+        app.entries = vec![entry(1, 7, "E1", None)];
+        app.total_unread = 1;
+        app.selected_source = Some(7);
+        app.selected_article = Some(1);
+
+        // Nothing pending → nothing to load (no wasted request).
+        app.pending_ids = vec![];
+        assert!(app.maybe_begin_load_more().is_none(), "exhausted: no load");
+
+        // A load already in flight is not duplicated.
+        app.pending_ids = vec![9, 8];
+        app.in_flight_more = Some(vec![10]);
+        assert!(
+            app.maybe_begin_load_more().is_none(),
+            "in-flight guard holds"
+        );
+    }
+
+    #[test]
+    fn load_more_error_restores_the_batch_for_retry() {
+        let mut app = App::new();
+        app.status = Status::Ready;
+        app.entries = vec![entry(3, 7, "E3", None)];
+        app.total_unread = 3;
+        app.pending_ids = vec![2, 1];
+        app.selected_source = Some(7);
+        app.selected_article = Some(3);
+
+        let batch = app.maybe_begin_load_more().expect("starts a load");
+        assert_eq!(batch, vec![2, 1]);
+
+        app.apply(Msg::LoadedMore(Err("boom".to_string())));
+        assert!(app.in_flight_more.is_none(), "guard cleared on error");
+        assert_eq!(
+            app.pending_ids,
+            vec![2, 1],
+            "the batch is restored to the front for retry"
+        );
+        assert!(app.notice.is_some(), "a failure notice is shown");
+    }
+
+    #[test]
     fn oversize_image_art_is_clipped_so_it_cannot_wrap() {
         // Regression: image art is rendered at the reader width when it was
         // fetched, then cached. If the terminal later narrows, the stale-wide art
@@ -2240,6 +2431,7 @@ mod tests {
             entries,
             feed_titles,
             total_unread: 3,
+            pending_ids: Vec::new(),
         })));
         // Every article's image is queued proactively, not just the selected one.
         assert_eq!(app.image_queue.len(), 2);
@@ -2262,6 +2454,7 @@ mod tests {
             entries: vec![img_entry(1, 7, "https://x/1.png")],
             feed_titles,
             total_unread: 1,
+            pending_ids: Vec::new(),
         })));
         assert_eq!(app.next_queued_image().as_deref(), Some("https://x/1.png"));
         assert!(app.next_queued_image().is_none());
@@ -2290,6 +2483,7 @@ mod tests {
             ],
             feed_titles,
             total_unread: 2,
+            pending_ids: Vec::new(),
         })));
         // Both queued (Loading): 0 of 2.
         assert_eq!(app.image_progress(), Some((0, 2)));
@@ -2314,6 +2508,7 @@ mod tests {
             entries: vec![img_entry(1, 7, "https://x/1.png")],
             feed_titles,
             total_unread: 1,
+            pending_ids: Vec::new(),
         })));
         app.spinner_tick = 0; // freeze the animation frame
         let backend = ratatui::backend::TestBackend::new(100, 20);
@@ -2388,6 +2583,7 @@ mod tests {
                 entries: vec![entry],
                 feed_titles,
                 total_unread: 1,
+                pending_ids: Vec::new(),
             })));
             app
         };
@@ -2472,6 +2668,7 @@ mod tests {
             )],
             feed_titles,
             total_unread: 1,
+            pending_ids: Vec::new(),
         })));
         assert!(
             app.image_urls.contains(&"https://cdn/lead.jpg".to_string()),
@@ -2548,6 +2745,7 @@ mod tests {
             entries,
             feed_titles,
             total_unread: 4,
+            pending_ids: Vec::new(),
         })));
         let queue: Vec<String> = app.image_queue.iter().cloned().collect();
         assert_eq!(
@@ -2576,6 +2774,7 @@ mod tests {
             entries,
             feed_titles,
             total_unread: 3,
+            pending_ids: Vec::new(),
         })));
         assert_eq!(
             app.image_queue.iter().cloned().collect::<Vec<_>>(),
@@ -2620,6 +2819,7 @@ mod tests {
             entries: vec![entry],
             feed_titles,
             total_unread: 1,
+            pending_ids: Vec::new(),
         })));
         app.focus_right();
         app.focus_right(); // Reader
@@ -2752,6 +2952,7 @@ mod tests {
             entries,
             feed_titles,
             total_unread: 2,
+            pending_ids: Vec::new(),
         })));
         app.focus_right(); // focus Articles; the oldest article (id 1) is selected
         assert_eq!(app.selected_article, Some(1));
@@ -2865,6 +3066,7 @@ mod tests {
             entries: vec![],
             feed_titles: HashMap::new(),
             total_unread: 0,
+            pending_ids: Vec::new(),
         }))); // Ready + empty → the rose splash
         let backend = ratatui::backend::TestBackend::new(80, 24);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
@@ -2925,6 +3127,7 @@ mod tests {
             entries: vec![],
             feed_titles: HashMap::new(),
             total_unread: 0,
+            pending_ids: Vec::new(),
         })));
         // Far too small for the art — must fall back to the caption without panicking.
         let backend = ratatui::backend::TestBackend::new(10, 3);
@@ -2966,6 +3169,7 @@ mod tests {
             entries: vec![entry],
             feed_titles,
             total_unread: 1,
+            pending_ids: Vec::new(),
         })));
         for _ in 0..focus_steps {
             app.focus_right();
