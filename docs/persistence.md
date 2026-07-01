@@ -33,7 +33,7 @@ style). WAL journal mode.
 ## Schema (v1)
 
 ```sql
-meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)   -- schema_version; future sync cursors (TASK-42)
+meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)   -- schema_version; unread.etag / unread.last_modified (TASK-42)
 feeds(feed_id INTEGER PRIMARY KEY, title TEXT)
 entries(
     id        INTEGER PRIMARY KEY,          -- Feedbin entry id
@@ -68,6 +68,14 @@ Feedbin is authoritative for read state; the cache mirrors it.
   the cache; on failure the existing optimistic rollback leaves both sides
   unchanged. An offline write *queue* (mutating while disconnected) is **out of
   scope** here — writes still require the network.
+- **Delta sync (`get_validators`/`set_validators`, TASK-42)** — the `unread`
+  endpoint's `ETag`/`Last-Modified` are stored in `meta` and replayed as
+  `If-None-Match` / `If-Modified-Since`. A **`304 Not Modified`** short-circuits
+  the whole reload (no subscriptions/entries fetch) and keeps the current view —
+  so the common "nothing new" refresh costs one cheap request. Validators persist
+  across sessions, so even the first load of a session can 304. Incremental
+  hydration on a *changed* set + `updated_entries` content refresh are the
+  **TASK-44** follow-up.
 
 All cache writes happen on the **main thread** in the message-drain
 (`persist_msg`), so the `Connection` never crosses threads; network work stays on
@@ -85,11 +93,15 @@ is non-fatal — roses runs without persistence.
 ## Testing
 
 `store.rs` unit tests use an in-memory / temp-file DB: round-trip,
-reconcile-marks-reads, write-through, load-more upsert, and reopen-persists. The
-App-level offline fallback (`failed_refresh_keeps_cached_view`) lives in `tui.rs`.
+reconcile-marks-reads, write-through, load-more upsert, reopen-persists, and the
+validators round-trip. The App-level offline fallback
+(`failed_refresh_keeps_cached_view`) and the 304 behavior
+(`not_modified_keeps_the_current_view`) live in `tui.rs`; the client's
+conditional 200-then-304 flow is in `feedbin.rs`.
 
 ## Future
 
-- **TASK-42** (delta sync) stores `ETag`/`Last-Modified` + a `since` cursor in `meta`.
+- **TASK-44** (delta sync part 2): incremental hydration on a changed set +
+  `updated_entries` content refresh (builds on TASK-42's validators).
 - **TASK-29** wires `starred` (read + write-through) on the existing column.
 - An offline write queue (mutate-while-disconnected) could build on this.

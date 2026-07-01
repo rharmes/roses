@@ -92,6 +92,10 @@ recomputed from the ids each frame (`source_index`, `article_index`).
   - `Write { op: WriteOp, entry: Entry, index: usize, result: Result<(), String> }`
   - `Image { url: String, result: Result<Vec<Line<'static>>, String> }`
   - `LoadedMore(Result<Vec<Entry>, String>)` — a lazily-hydrated older batch to append (TASK-40).
+  - `NotModified` — the conditional unread fetch 304'd; keep the current view (TASK-42).
+  - `Validators(feedbin::Validators)` — fresh `ETag`/`Last-Modified` to persist; no UI effect (TASK-42).
+- `LoadOutcome { NotModified, Fresh(Loaded, Validators) }` — what `load()` returns to `spawn_fetch` (TASK-42).
+- `feedbin::Validators { etag: Option<String>, last_modified: Option<String> }` + `Conditional<T> { NotModified, Modified { data, validators } }` — HTTP-caching types; stored in the cache's `meta` table under `unread.etag` / `unread.last_modified`.
 - `WriteOp { MarkRead, Undo }` — which unread-state write a `spawn_write` performed.
 - `Undone { entry: Entry, index: usize }` — an undoable mark-read (entry + its position in `entries`).
 - `Action { None, Reload, MarkRead, Undo, OpenInBrowser }` — what a keypress asks the loop to do.
@@ -115,7 +119,7 @@ states: `Ready` → the art lines; `Failed` → `[image unavailable: <url>]`; ot
 
 A local SQLite DB at `$XDG_DATA_HOME/roses/roses.db` (or `~/.local/share/roses/roses.db`) caches feeds,
 entries, and read state so the TUI paints instantly and reads offline. Tables: `meta(key, value)` (schema
-version + future sync cursors), `feeds(feed_id, title)`, and `entries(id, feed_id, published, unread,
+version + the TASK-42 HTTP validators `unread.etag`/`unread.last_modified`), `feeds(feed_id, title)`, and `entries(id, feed_id, published, unread,
 starred, json)` — scalar columns for the unread query/sort plus a serialized-`Entry` JSON blob for full
 hydration. `starred` exists from v1 but is wired by TASK-29. `store::CachedSnapshot { entries, feed_titles,
 total_unread }` is the initial-paint payload. Feedbin stays the source of truth for read state; full schema

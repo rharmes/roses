@@ -27,7 +27,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::browser;
 use crate::config::BrowserPref;
-use crate::feedbin::{Client, Enclosure, Entry};
+use crate::feedbin::{Client, Conditional, Enclosure, Entry, Validators};
 use crate::store::Store;
 use crate::text::strip_control_chars;
 use crate::theme;
@@ -94,6 +94,19 @@ enum Msg {
     },
     /// A lazily-hydrated batch of older unread entries to append (TASK-40).
     LoadedMore(Result<Vec<Entry>, String>),
+    /// The conditional unread fetch returned `304 Not Modified` — nothing
+    /// changed, so keep the current view (TASK-42).
+    NotModified,
+    /// Fresh HTTP validators from a `200` unread fetch, to persist for the next
+    /// conditional request (TASK-42). No UI effect.
+    Validators(Validators),
+}
+
+/// Outcome of the conditional load (TASK-42): unchanged, or a fresh snapshot
+/// plus the validators to store.
+enum LoadOutcome {
+    NotModified,
+    Fresh(Loaded, Validators),
 }
 
 /// Cache state for one entry image (TASK-8).
@@ -508,6 +521,17 @@ impl App {
                 }
                 self.notice = Some(format!("Load more failed (will retry): {err}"));
             }
+
+            Msg::NotModified => {
+                // 304: the unread set is unchanged, so keep the current view and
+                // just settle a pending Loading state (TASK-42).
+                if matches!(self.status, Status::Loading) {
+                    self.status = Status::Ready;
+                }
+                self.notice = None;
+            }
+            // Validators are persisted by `persist_msg`; no UI effect.
+            Msg::Validators(_) => {}
         }
     }
 
@@ -1514,10 +1538,28 @@ fn sanitize(s: &str) -> String {
     out_lines.join("\n").trim().to_string()
 }
 
-fn spawn_fetch(handle: &Handle, client: Client, tx: UnboundedSender<Msg>) {
-    handle.spawn_blocking(move || {
-        let result = load(&client).map_err(|e| format!("{e:#}"));
-        let _ = tx.send(Msg::Loaded(result));
+/// The stored HTTP validators for the unread endpoint, or empty when there's no
+/// cache yet (TASK-42).
+fn stored_validators(store: &Option<Store>) -> Validators {
+    store
+        .as_ref()
+        .map(|s| s.get_validators("unread"))
+        .unwrap_or_default()
+}
+
+fn spawn_fetch(handle: &Handle, client: Client, tx: UnboundedSender<Msg>, validators: Validators) {
+    handle.spawn_blocking(move || match load(&client, &validators) {
+        Ok(LoadOutcome::NotModified) => {
+            let _ = tx.send(Msg::NotModified);
+        }
+        // Send the snapshot, then the fresh validators for persist_msg to store.
+        Ok(LoadOutcome::Fresh(loaded, new_validators)) => {
+            let _ = tx.send(Msg::Loaded(Ok(loaded)));
+            let _ = tx.send(Msg::Validators(new_validators));
+        }
+        Err(e) => {
+            let _ = tx.send(Msg::Loaded(Err(format!("{e:#}"))));
+        }
     });
 }
 
@@ -1597,13 +1639,22 @@ fn persist_msg(store: &mut Store, msg: &Msg) {
         } => {
             let _ = store.set_unread(entry.id, matches!(op, WriteOp::Undo));
         }
+        // Persist fresh HTTP validators so the next fetch can 304 (TASK-42).
+        Msg::Validators(v) => {
+            let _ = store.set_validators("unread", v);
+        }
         _ => {}
     }
 }
 
-/// Blocking fetch of the newest unread entries plus their feed names.
-fn load(client: &Client) -> Result<Loaded> {
-    let mut unread = client.unread_entry_ids()?;
+/// Blocking, conditional fetch of the newest unread entries plus their feed
+/// names. Replays `validators`; a `304` short-circuits to `NotModified` without
+/// touching subscriptions/entries (TASK-42).
+fn load(client: &Client, validators: &Validators) -> Result<LoadOutcome> {
+    let (mut unread, new_validators) = match client.unread_entry_ids_conditional(validators)? {
+        Conditional::NotModified => return Ok(LoadOutcome::NotModified),
+        Conditional::Modified { data, validators } => (data, validators),
+    };
     let total_unread = unread.len();
     unread.sort_unstable_by(|a, b| b.cmp(a));
     // Hydrate the newest window now; keep the rest as pending ids to hydrate on
@@ -1611,22 +1662,28 @@ fn load(client: &Client) -> Result<Loaded> {
     let pending_ids: Vec<i64> = unread.split_off(unread.len().min(DISPLAY_LIMIT));
     let sample = unread;
     if sample.is_empty() {
-        return Ok(Loaded {
-            entries: Vec::new(),
-            feed_titles: HashMap::new(),
-            total_unread,
-            pending_ids,
-        });
+        return Ok(LoadOutcome::Fresh(
+            Loaded {
+                entries: Vec::new(),
+                feed_titles: HashMap::new(),
+                total_unread,
+                pending_ids,
+            },
+            new_validators,
+        ));
     }
     let feed_titles = client.feed_titles()?;
     let mut entries = client.entries(&sample)?;
     entries.sort_by(|a, b| b.published.cmp(&a.published));
-    Ok(Loaded {
-        entries,
-        feed_titles,
-        total_unread,
-        pending_ids,
-    })
+    Ok(LoadOutcome::Fresh(
+        Loaded {
+            entries,
+            feed_titles,
+            total_unread,
+            pending_ids,
+        },
+        new_validators,
+    ))
 }
 
 /// Run the full-screen TUI until the user quits, restoring the terminal on the
@@ -1639,7 +1696,6 @@ pub fn run(client: Client) -> Result<()> {
     let browser_pref = crate::config::load_browser_pref().unwrap_or_default();
 
     let (tx, mut rx) = mpsc::unbounded_channel::<Msg>();
-    spawn_fetch(&handle, client.clone(), tx.clone());
 
     let mut terminal = ratatui::init();
     let result = run_loop(&mut terminal, &handle, &client, &tx, &mut rx, &browser_pref);
@@ -1683,9 +1739,8 @@ fn run_loop(
     browser_pref: &BrowserPref,
 ) -> Result<()> {
     let mut app = App::new();
-    // Open the offline cache and paint from it immediately; the background fetch
-    // (already spawned by `run`) reconciles it (TASK-41). A cache failure is
-    // non-fatal — roses just runs without persistence.
+    // Open the offline cache and paint from it immediately (TASK-41); a cache
+    // failure is non-fatal — roses just runs without persistence.
     let mut store = Store::open().ok();
     if let Some(store) = &store
         && let Ok(snap) = store.load_unread(DISPLAY_LIMIT)
@@ -1698,6 +1753,14 @@ fn run_loop(
             pending_ids: Vec::new(),
         })));
     }
+    // Kick off the first reconcile, replaying any stored validators so an
+    // unchanged unread set comes back as a cheap 304 (TASK-42).
+    spawn_fetch(
+        handle,
+        client.clone(),
+        tx.clone(),
+        stored_validators(&store),
+    );
     let mut images_in_flight = 0usize;
     let mut last_selected = None;
     while !app.should_quit {
@@ -1747,7 +1810,12 @@ fn run_loop(
                 Action::None => {}
                 Action::Reload => {
                     app.status = Status::Loading;
-                    spawn_fetch(handle, client.clone(), tx.clone());
+                    spawn_fetch(
+                        handle,
+                        client.clone(),
+                        tx.clone(),
+                        stored_validators(&store),
+                    );
                 }
                 Action::MarkRead => {
                     if let Some((entry, index)) = app.begin_mark_read() {
@@ -2423,6 +2491,26 @@ mod tests {
         let mut empty = App::new();
         empty.apply(Msg::Loaded(Err("boom".to_string())));
         assert!(matches!(empty.status, Status::Failed(_)));
+    }
+
+    #[test]
+    fn not_modified_keeps_the_current_view() {
+        // TASK-42: a 304 keeps the current entries/selection and settles a
+        // pending Loading state to Ready — no re-render churn, no reset.
+        let mut app = App::new();
+        app.status = Status::Ready;
+        app.entries = vec![entry(1, 7, "E1", None)];
+        app.selected_source = Some(7);
+        app.selected_article = Some(1);
+        app.apply(Msg::NotModified);
+        assert!(matches!(app.status, Status::Ready));
+        assert_eq!(app.entries.len(), 1, "304 keeps cached entries");
+        assert_eq!(app.selected_article, Some(1), "304 doesn't reset selection");
+
+        // A 304 arriving while still Loading settles the status to Ready.
+        let mut loading = App::new(); // status starts as Loading
+        loading.apply(Msg::NotModified);
+        assert!(matches!(loading.status, Status::Ready));
     }
 
     #[test]

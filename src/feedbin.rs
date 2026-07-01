@@ -122,6 +122,22 @@ struct Subscription {
     title: Option<String>,
 }
 
+/// HTTP cache validators for a Feedbin GET response (TASK-42). Replayed as
+/// `If-None-Match` / `If-Modified-Since` on the next request so an unchanged
+/// endpoint returns `304 Not Modified` instead of the full body.
+#[derive(Debug, Clone, Default)]
+pub struct Validators {
+    pub etag: Option<String>,
+    pub last_modified: Option<String>,
+}
+
+/// The outcome of a conditional GET: unchanged (`304`), or fresh data plus the
+/// new validators to store for next time.
+pub enum Conditional<T> {
+    NotModified,
+    Modified { data: T, validators: Validators },
+}
+
 /// A blocking Feedbin v2 client bound to one set of credentials. Cloning is
 /// cheap (the inner `reqwest` client is reference-counted) and lets the TUI
 /// move a copy into a background `spawn_blocking` fetch.
@@ -202,6 +218,40 @@ impl Client {
         check_status(resp)?
             .json::<Vec<i64>>()
             .context("parsing the unread entry ID list")
+    }
+
+    /// Like [`Client::unread_entry_ids`] but conditional (TASK-42): replays the
+    /// stored `ETag`/`Last-Modified` so an unchanged unread set comes back as a
+    /// cheap `304 Not Modified`; otherwise returns the ids plus the fresh
+    /// validators to persist. (`roses list` uses the plain variant above.)
+    pub fn unread_entry_ids_conditional(
+        &self,
+        validators: &Validators,
+    ) -> Result<Conditional<Vec<i64>>> {
+        use reqwest::header::{ETAG, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED};
+
+        let mut req = self.get("unread_entries.json");
+        if let Some(etag) = &validators.etag {
+            req = req.header(IF_NONE_MATCH, etag);
+        }
+        if let Some(last_modified) = &validators.last_modified {
+            req = req.header(IF_MODIFIED_SINCE, last_modified);
+        }
+        let resp = req
+            .send()
+            .context("requesting unread entry IDs from Feedbin")?;
+        if resp.status() == reqwest::StatusCode::NOT_MODIFIED {
+            return Ok(Conditional::NotModified);
+        }
+        let resp = check_status(resp)?;
+        let validators = Validators {
+            etag: header_string(resp.headers(), ETAG),
+            last_modified: header_string(resp.headers(), LAST_MODIFIED),
+        };
+        let data = resp
+            .json::<Vec<i64>>()
+            .context("parsing the unread entry ID list")?;
+        Ok(Conditional::Modified { data, validators })
     }
 
     /// Hydrate entries by ID into typed structs, batching at the 100-ID limit
@@ -288,6 +338,17 @@ impl Client {
     }
 }
 
+/// Read a response header as an owned `String`, if present and valid UTF-8.
+fn header_string(
+    headers: &reqwest::header::HeaderMap,
+    name: reqwest::header::HeaderName,
+) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+}
+
 /// Pass successful responses through; turn any non-2xx status into an
 /// actionable error so external input never panics the client (AC #5).
 fn check_status(resp: reqwest::blocking::Response) -> Result<reqwest::blocking::Response> {
@@ -368,6 +429,49 @@ mod tests {
             client.unread_entry_ids().unwrap(),
             vec![1013, 1014, 2_000_000]
         );
+    }
+
+    #[test]
+    fn conditional_unread_captures_validators_then_304s() {
+        let mut server = mockito::Server::new();
+        // First request (no validators): 200 with an ETag + Last-Modified.
+        let m200 = server
+            .mock("GET", "/v2/unread_entries.json")
+            .match_header("if-none-match", mockito::Matcher::Missing)
+            .with_status(200)
+            .with_header("etag", "\"abc123\"")
+            .with_header("last-modified", "Sat, 02 Feb 2013 15:20:46 GMT")
+            .with_body("[1, 2]")
+            .create();
+        let client = test_client(&server);
+        let validators = match client
+            .unread_entry_ids_conditional(&Validators::default())
+            .unwrap()
+        {
+            Conditional::Modified { data, validators } => {
+                assert_eq!(data, vec![1, 2]);
+                validators
+            }
+            Conditional::NotModified => panic!("first request should be a 200, not a 304"),
+        };
+        assert_eq!(validators.etag.as_deref(), Some("\"abc123\""));
+        assert_eq!(
+            validators.last_modified.as_deref(),
+            Some("Sat, 02 Feb 2013 15:20:46 GMT")
+        );
+        m200.assert();
+
+        // Replaying the ETag yields a 304 with no body — the fast path.
+        let m304 = server
+            .mock("GET", "/v2/unread_entries.json")
+            .match_header("if-none-match", "\"abc123\"")
+            .with_status(304)
+            .create();
+        assert!(matches!(
+            client.unread_entry_ids_conditional(&validators).unwrap(),
+            Conditional::NotModified
+        ));
+        m304.assert();
     }
 
     #[test]

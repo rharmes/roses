@@ -73,9 +73,13 @@ So `App` is only ever touched on the main thread; background threads communicate
 
 ### Background tasks (`spawn_*`)
 
-- `spawn_fetch` → `load(client)`: `unread_entry_ids()` → sort desc, hydrate newest `DISPLAY_LIMIT` (50)
-  via `feed_titles()` + `entries(&sample)` → sort by `published` desc → `Msg::Loaded`; the remaining ids
-  ride along as `pending_ids` for lazy hydration (TASK-40).
+- `spawn_fetch` → `load(client, validators)`: a **conditional** `unread_entry_ids_conditional()` replaying
+  the stored `ETag`/`Last-Modified` (TASK-42). A **`304`** → `Msg::NotModified` (keep the current view, no
+  further fetch). A **`200`** → sort desc, hydrate newest `DISPLAY_LIMIT` (50) via `feed_titles()` +
+  `entries(&sample)` → sort by `published` desc → `Msg::Loaded`, then `Msg::Validators` with the fresh
+  validators to persist; the remaining ids ride along as `pending_ids` for lazy hydration (TASK-40). The
+  main thread reads the validators from the cache before spawning and writes the new ones back in
+  `persist_msg`, so the `Store` stays single-threaded.
 - `spawn_load_more` → `entries(&ids)` for the next `LOAD_MORE_BATCH` (100) pending ids → `Msg::LoadedMore`
   (appended then re-sorted by `published`). **Pagination is hydrate-on-demand:** `unread_entries.json`
   already returns the *complete* unread id list, so roses just hydrates more of it as the reader nears the
