@@ -18,8 +18,9 @@ into the UI loop in `tui.rs`.
 - **Trade-off (musl):** bundled SQLite is C compiled via `cc`. This reintroduces
   a C-compiled dependency into the otherwise-C-free static-musl build (the
   keyring backend was deliberately kept pure-Rust via zbus). `rusqlite`+`bundled`
-  links cleanly under `*-unknown-linux-musl`; the cargo-dist release pipeline
-  should be re-verified on the next tag — see [`release.md`](release.md).
+  links cleanly under `*-unknown-linux-musl`, and CI's **`musl-build`** job
+  (TASK-43) builds `x86_64-unknown-linux-musl` on every push/PR and asserts the
+  binary is statically linked — see [`ci.md`](ci.md) / [`release.md`](release.md).
 - **Alternatives considered:** async `sqlx` (needs a runtime — mismatch);
   pure-Rust `redb`/`native_db` (keeps musl C-free but isn't SQL and deviates from
   the task's "SQLite").
