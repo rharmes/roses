@@ -48,6 +48,27 @@ It's a **separate job** on purpose: a keyring/D-Bus hiccup surfaces as a red che
 the core `lint-and-test` gate. It is intentionally **not** (yet) a required status check for that
 reason — promote it once it has proven stable (add `"linux-keychain"` to the `contexts` list below).
 
+## Static musl build (`musl-build` job)
+
+A third job on `ubuntu-latest` builds the **static-musl release target** so a linking regression is
+caught on every push/PR instead of at release time. It exists because [`store.rs`](../src/store.rs)'s
+`rusqlite` uses the `bundled` feature, which compiles SQLite from **C** — re-adding a C dependency to the
+otherwise-C-free musl build (see [`persistence.md`](persistence.md)). The job:
+
+```sh
+rustup target add x86_64-unknown-linux-musl
+sudo apt-get install -y musl-tools          # provides musl-gcc
+CC_x86_64_unknown_linux_musl=musl-gcc \
+  cargo build --release --locked --target x86_64-unknown-linux-musl
+file target/x86_64-unknown-linux-musl/release/roses | grep -q 'statically linked'
+```
+
+`musl-gcc` compiles rusqlite's bundled `sqlite3.c` for the musl target; the final `file` check asserts the
+binary is self-contained (statically linked). Only **x86_64** is built here — aarch64-musl (also in the
+release matrix) would need a cross C toolchain and is left as a possible extension. Like `linux-keychain`
+it's a **separate/advisory** job (not yet a required check) so a toolchain hiccup can't block the core gate;
+promote it by adding `"musl-build"` to the `contexts` list below.
+
 ## Toolchain pinning
 
 The job installs the toolchain pinned in [`rust-toolchain.toml`](../rust-toolchain.toml) —

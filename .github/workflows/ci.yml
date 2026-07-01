@@ -84,3 +84,50 @@ jobs:
             echo -n "roses-ci" | gnome-keyring-daemon --unlock --components=secrets
             cargo test --locked -- --ignored keychain_round_trip_via_secret_service
           '
+
+  # Verifies the static-musl release path builds and links (TASK-43). rusqlite's
+  # `bundled` feature compiles SQLite from C, which re-added a C dependency to the
+  # otherwise-C-free musl build (TASK-41); this catches a linking regression on
+  # every push/PR rather than at release time. x86_64 only for now — aarch64-musl
+  # would need a cross C toolchain. Separate/advisory job so a toolchain hiccup
+  # can't block the core gate. See docs/ci.md.
+  musl-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v7
+
+      - name: Install the pinned Rust toolchain (stable) + musl target
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add x86_64-unknown-linux-musl
+
+      - name: Cache cargo registry and build output
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: musl
+
+      # musl-gcc (from musl-tools) compiles rusqlite's bundled sqlite3.c for the
+      # musl target — the C dependency this job exists to verify.
+      - name: Install musl-tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+      - name: Build the static musl release binary
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+        run: cargo build --release --locked --target x86_64-unknown-linux-musl
+
+      - name: Verify the binary is statically linked
+        run: |
+          bin=target/x86_64-unknown-linux-musl/release/roses
+          file "$bin"
+          # A self-contained musl binary is reported as "statically linked" or,
+          # on modern toolchains, "static-pie linked". Fail only if it came out
+          # dynamic (the real regression this guards against).
+          if file "$bin" | grep -q 'dynamically linked'; then
+            echo "ERROR: expected a static binary, got a dynamic one"; exit 1
+          fi
+          file "$bin" | grep -Eq 'statically linked|static-pie linked'
