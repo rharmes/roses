@@ -1,11 +1,11 @@
 ---
 id: TASK-38
 title: OPML import and export
-status: In Progress
+status: Done
 assignee:
   - '@ross'
 created_date: '2026-07-01 14:38'
-updated_date: '2026-07-02 17:36'
+updated_date: '2026-07-02 17:43'
 labels:
   - feature
   - feedbin-api
@@ -44,3 +44,9 @@ Support bulk feed migration. Import via Feedbin POST /imports.json (OPML upload)
 <!-- SECTION:NOTES:BEGIN -->
 Implemented on branch task-38-opml-import-export. Design per interview: export takes FILE or stdout (status to stderr so piped OPML stays clean); flat OPML sorted by title (folders deferred to TASK-31); import polls to completion + prints tally; hand-rolled writer, no XML crate (import needs no parser — Feedbin parses server-side). New src/opml.rs: OpmlFeed + to_opml (OPML 2.0, xml_escape) + golden test + empty-doc test. feedbin.rs: Subscription now pub with feed_url/site_url; subscriptions() (feed_titles() refactored to reuse it); Import/ImportItem + Import::tally()->ImportTally (pure); create_import (POST imports.json text/xml raw) + import_status (GET imports/{id}.json); mockito tests for subscriptions/create_import/import_status + tally unit tests. main.rs: mod opml; export/import dispatch + usage; run_export (skip feeds w/o feed_url, sort by title, write file/stdout); run_import (require FILE, err on empty, poll every 2s cap ~5min, print tally + failed urls). 136 tests pass, fmt+clippy clean, 5x stable. Docs in-commit: README Import & export section, architecture (opml module row, CLI dispatch, network table imports rows, OPML section), data-model (Subscription pub, Import/ImportItem/ImportTally/OpmlFeed, imports API rows).
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Shipped as PR #33 (merged to main). Two headless subcommands: 'roses export [FILE]' builds a flat, XML-escaped OPML 2.0 document client-side (Feedbin has no export endpoint) from subscriptions() — sorted by title, feeds without feed_url skipped, status to stderr so piped OPML stays clean; 'roses import FILE' POSTs raw OPML as text/xml (no parser — Feedbin parses server-side) then polls the async import every 2s (cap ~5min) to completion, printing an Import::tally() summary of complete/pending/failed + failed URLs. New dependency-free src/opml.rs (to_opml + xml_escape). feedbin.rs: Subscription now pub with feed_url/site_url (feed_titles() reuses new subscriptions()); Import/ImportItem + pure Import::tally()->ImportTally; create_import + import_status. Folder/tag grouping deferred to TASK-31 (flat for now). Tests: golden OPML + empty-doc, mockito for subscriptions/create_import/import_status, tally units. 136 pass, fmt+clippy clean, 5x stable; docs updated in-commit (README, architecture, data-model).
+<!-- SECTION:FINAL_SUMMARY:END -->

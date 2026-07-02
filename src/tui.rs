@@ -99,9 +99,16 @@ enum Msg {
     /// The conditional unread fetch returned `304 Not Modified` — nothing
     /// changed, so keep the current view (TASK-42).
     NotModified,
-    /// Fresh HTTP validators from a `200` unread fetch, to persist for the next
-    /// conditional request (TASK-42). No UI effect.
-    Validators(Validators),
+    /// Entries whose content Feedbin refreshed (TASK-44): their bodies are
+    /// swapped into place by id, leaving the unread set and read state unchanged.
+    UpdatedEntries(Vec<Entry>),
+    /// Fresh HTTP validators from a `200` id-list fetch, tagged with the endpoint
+    /// (`"unread"` / `"updated"`) they belong to, to persist for the next
+    /// conditional request (TASK-42/44). No UI effect.
+    Validators {
+        endpoint: &'static str,
+        validators: Validators,
+    },
 }
 
 /// Outcome of the conditional load (TASK-42): unchanged, or a fresh snapshot
@@ -479,7 +486,12 @@ impl App {
         match msg {
             Msg::Loaded(Ok(loaded)) => {
                 self.entries = loaded.entries;
-                self.feed_titles = loaded.feed_titles;
+                // An incremental reconcile that reused every window entry skips the
+                // feed-titles fetch and sends an empty map (TASK-44) — keep the
+                // titles we already have rather than blanking them.
+                if !loaded.feed_titles.is_empty() {
+                    self.feed_titles = loaded.feed_titles;
+                }
                 self.total_unread = loaded.total_unread;
                 self.pending_ids = loaded.pending_ids;
                 self.in_flight_more = None;
@@ -584,8 +596,29 @@ impl App {
                 }
                 self.notice = None;
             }
+
+            Msg::UpdatedEntries(updated) => {
+                // Swap refreshed bodies into place by id (TASK-44); ids we no
+                // longer hold are ignored. The unread set and read state are
+                // untouched — only content changes.
+                let mut changed = false;
+                for entry in updated {
+                    if let Some(existing) = self.entries.iter_mut().find(|e| e.id == entry.id) {
+                        *existing = entry;
+                        changed = true;
+                    }
+                }
+                if changed {
+                    // Invalidate the reader cache + bump the image generation so a
+                    // currently-shown article re-renders with the new content, and
+                    // queue any images the refreshed body introduced.
+                    self.reader_cache = None;
+                    self.image_generation = self.image_generation.wrapping_add(1);
+                    self.refill_image_queue();
+                }
+            }
             // Validators are persisted by `persist_msg`; no UI effect.
-            Msg::Validators(_) => {}
+            Msg::Validators { .. } => {}
         }
     }
 
@@ -1906,13 +1939,23 @@ fn sanitize(s: &str) -> String {
     out_lines.join("\n").trim().to_string()
 }
 
-/// The stored HTTP validators for the unread endpoint, or empty when there's no
-/// cache yet (TASK-42).
-fn stored_validators(store: &Option<Store>) -> Validators {
+/// The stored HTTP validators for `endpoint` (`"unread"` / `"updated"`), or empty
+/// when there's no cache yet (TASK-42/44).
+fn stored_validators(store: &Option<Store>, endpoint: &str) -> Validators {
     store
         .as_ref()
-        .map(|s| s.get_validators("unread"))
+        .map(|s| s.get_validators(endpoint))
         .unwrap_or_default()
+}
+
+/// The reuse pool for an incremental reconcile (TASK-44): the entries we already
+/// hold in memory, keyed by id. `load()` diffs the fresh unread window against
+/// this to hydrate only what's missing, and `refresh_updated()` re-hydrates only
+/// the updated ids it contains. In-memory `entries` are the cache's loaded
+/// projection (seeded from and written through to the store), so this is the
+/// "already cached" set the reconcile reuses.
+fn reuse_pool(app: &App) -> HashMap<i64, Entry> {
+    app.entries.iter().map(|e| (e.id, e.clone())).collect()
 }
 
 /// Whether the background auto-refresh timer should fire now: it's enabled, no
@@ -1923,18 +1966,45 @@ fn should_auto_refresh(interval: Option<Duration>, elapsed: Duration, in_flight:
     matches!(interval, Some(i) if !in_flight && elapsed >= i)
 }
 
-fn spawn_fetch(handle: &Handle, client: Client, tx: UnboundedSender<Msg>, validators: Validators) {
-    handle.spawn_blocking(move || match load(&client, &validators) {
-        Ok(LoadOutcome::NotModified) => {
-            let _ = tx.send(Msg::NotModified);
+fn spawn_fetch(
+    handle: &Handle,
+    client: Client,
+    tx: UnboundedSender<Msg>,
+    unread_validators: Validators,
+    updated_validators: Validators,
+    reuse: HashMap<i64, Entry>,
+) {
+    handle.spawn_blocking(move || {
+        // AC #1: the unread reconcile, hydrating only ids we don't already hold.
+        match load(&client, &unread_validators, &reuse) {
+            Ok(LoadOutcome::NotModified) => {
+                let _ = tx.send(Msg::NotModified);
+            }
+            // Send the snapshot, then the fresh validators for persist_msg to store.
+            Ok(LoadOutcome::Fresh(loaded, new_validators)) => {
+                let _ = tx.send(Msg::Loaded(Ok(loaded)));
+                let _ = tx.send(Msg::Validators {
+                    endpoint: "unread",
+                    validators: new_validators,
+                });
+            }
+            Err(e) => {
+                let _ = tx.send(Msg::Loaded(Err(format!("{e:#}"))));
+            }
         }
-        // Send the snapshot, then the fresh validators for persist_msg to store.
-        Ok(LoadOutcome::Fresh(loaded, new_validators)) => {
-            let _ = tx.send(Msg::Loaded(Ok(loaded)));
-            let _ = tx.send(Msg::Validators(new_validators));
-        }
-        Err(e) => {
-            let _ = tx.send(Msg::Loaded(Err(format!("{e:#}"))));
+        // AC #2: refresh changed content (TASK-44). Sent after the reconcile so a
+        // body swap lands on top of any reused (stale) body. Best-effort — a
+        // failure here never fails the reconcile above.
+        if let Ok(Some((refreshed, new_validators))) =
+            refresh_updated(&client, &updated_validators, &reuse)
+        {
+            if !refreshed.is_empty() {
+                let _ = tx.send(Msg::UpdatedEntries(refreshed));
+            }
+            let _ = tx.send(Msg::Validators {
+                endpoint: "updated",
+                validators: new_validators,
+            });
         }
     });
 }
@@ -2005,6 +2075,10 @@ fn persist_msg(store: &mut Store, msg: &Msg) {
         Msg::LoadedMore(Ok(more)) => {
             let _ = store.upsert_entries(more);
         }
+        // Write refreshed bodies through, preserving read/star state (TASK-44).
+        Msg::UpdatedEntries(more) => {
+            let _ = store.refresh_entries(more);
+        }
         Msg::Write {
             op,
             batch,
@@ -2015,9 +2089,12 @@ fn persist_msg(store: &mut Store, msg: &Msg) {
                 let _ = store.set_unread(entry.id, unread);
             }
         }
-        // Persist fresh HTTP validators so the next fetch can 304 (TASK-42).
-        Msg::Validators(v) => {
-            let _ = store.set_validators("unread", v);
+        // Persist fresh HTTP validators so the next fetch can 304 (TASK-42/44).
+        Msg::Validators {
+            endpoint,
+            validators,
+        } => {
+            let _ = store.set_validators(endpoint, validators);
         }
         _ => {}
     }
@@ -2026,7 +2103,11 @@ fn persist_msg(store: &mut Store, msg: &Msg) {
 /// Blocking, conditional fetch of the newest unread entries plus their feed
 /// names. Replays `validators`; a `304` short-circuits to `NotModified` without
 /// touching subscriptions/entries (TASK-42).
-fn load(client: &Client, validators: &Validators) -> Result<LoadOutcome> {
+fn load(
+    client: &Client,
+    validators: &Validators,
+    reuse: &HashMap<i64, Entry>,
+) -> Result<LoadOutcome> {
     let (mut unread, new_validators) = match client.unread_entry_ids_conditional(validators)? {
         Conditional::NotModified => return Ok(LoadOutcome::NotModified),
         Conditional::Modified { data, validators } => (data, validators),
@@ -2036,8 +2117,8 @@ fn load(client: &Client, validators: &Validators) -> Result<LoadOutcome> {
     // Hydrate the newest window now; keep the rest as pending ids to hydrate on
     // demand as the user reads toward the end (TASK-40).
     let pending_ids: Vec<i64> = unread.split_off(unread.len().min(DISPLAY_LIMIT));
-    let sample = unread;
-    if sample.is_empty() {
+    let window = unread;
+    if window.is_empty() {
         return Ok(LoadOutcome::Fresh(
             Loaded {
                 entries: Vec::new(),
@@ -2048,8 +2129,33 @@ fn load(client: &Client, validators: &Validators) -> Result<LoadOutcome> {
             new_validators,
         ));
     }
-    let feed_titles = client.feed_titles()?;
-    let mut entries = client.entries(&sample)?;
+    // Incremental hydration (TASK-44): fetch only the window ids we don't already
+    // hold in memory, and reuse the rest — so the common tick that adds one entry
+    // hydrates just that one instead of re-fetching the whole window.
+    let missing: Vec<i64> = window
+        .iter()
+        .copied()
+        .filter(|id| !reuse.contains_key(id))
+        .collect();
+    // Feed titles only change when a new feed appears, which requires a new
+    // entry — so skip the `subscriptions.json` round-trip when nothing is
+    // missing (`apply` keeps the existing titles for an empty map).
+    let feed_titles = if missing.is_empty() {
+        HashMap::new()
+    } else {
+        client.feed_titles()?
+    };
+    let mut fetched: HashMap<i64, Entry> = client
+        .entries(&missing)?
+        .into_iter()
+        .map(|e| (e.id, e))
+        .collect();
+    // Assemble the full window from freshly-fetched + reused bodies, then sort by
+    // published desc (the display invariant; selection is by id, so it survives).
+    let mut entries: Vec<Entry> = window
+        .iter()
+        .filter_map(|id| fetched.remove(id).or_else(|| reuse.get(id).cloned()))
+        .collect();
     entries.sort_by(|a, b| b.published.cmp(&a.published));
     Ok(LoadOutcome::Fresh(
         Loaded {
@@ -2060,6 +2166,39 @@ fn load(client: &Client, validators: &Validators) -> Result<LoadOutcome> {
         },
         new_validators,
     ))
+}
+
+/// Refresh the bodies of already-loaded entries whose content Feedbin updated
+/// (TASK-44 AC #2). Conditionally fetches the `updated_entries` queue; re-hydrates
+/// only the ids we currently hold (`reuse`), drains the *whole* returned batch so
+/// it doesn't come back, and returns the refreshed bodies plus fresh validators.
+/// `Ok(None)` means the queue was unchanged (`304`). Best-effort: the caller
+/// swallows errors so a content-refresh failure never fails the main reconcile.
+fn refresh_updated(
+    client: &Client,
+    validators: &Validators,
+    reuse: &HashMap<i64, Entry>,
+) -> Result<Option<(Vec<Entry>, Validators)>> {
+    let (ids, new_validators) = match client.updated_entry_ids_conditional(validators)? {
+        Conditional::NotModified => return Ok(None),
+        Conditional::Modified { data, validators } => (data, validators),
+    };
+    // Re-hydrate only entries we actually display; an updated id we don't hold
+    // will be fetched fresh on demand later, so there's nothing to refresh now.
+    let to_refresh: Vec<i64> = ids
+        .iter()
+        .copied()
+        .filter(|id| reuse.contains_key(id))
+        .collect();
+    let refreshed = if to_refresh.is_empty() {
+        Vec::new()
+    } else {
+        client.entries(&to_refresh)?
+    };
+    // Drain the full batch (even ids we skipped) so the queue empties and Feedbin
+    // stops returning them.
+    client.delete_updated_entries(&ids)?;
+    Ok(Some((refreshed, new_validators)))
 }
 
 /// Run the full-screen TUI until the user quits, restoring the terminal on the
@@ -2173,12 +2312,15 @@ fn run_loop(
         })));
     }
     // Kick off the first reconcile, replaying any stored validators so an
-    // unchanged unread set comes back as a cheap 304 (TASK-42).
+    // unchanged unread set comes back as a cheap 304 (TASK-42), and reusing the
+    // cache-seeded entries so only new ids are hydrated (TASK-44).
     spawn_fetch(
         handle,
         client.clone(),
         tx.clone(),
-        stored_validators(&store),
+        stored_validators(&store, "unread"),
+        stored_validators(&store, "updated"),
+        reuse_pool(&app),
     );
     let mut images_in_flight = 0usize;
     let mut last_selected = None;
@@ -2241,7 +2383,9 @@ fn run_loop(
                 handle,
                 client.clone(),
                 tx.clone(),
-                stored_validators(&store),
+                stored_validators(&store, "unread"),
+                stored_validators(&store, "updated"),
+                reuse_pool(&app),
             );
             last_fetch = Instant::now();
             fetch_in_flight = true;
@@ -2259,7 +2403,9 @@ fn run_loop(
                         handle,
                         client.clone(),
                         tx.clone(),
-                        stored_validators(&store),
+                        stored_validators(&store, "unread"),
+                        stored_validators(&store, "updated"),
+                        reuse_pool(&app),
                     );
                     // Reset the auto-refresh timer so it doesn't immediately
                     // re-fetch on the heels of a manual reload (TASK-37).
@@ -2389,6 +2535,172 @@ mod tests {
             pending_ids: Vec::new(),
         })));
         app
+    }
+
+    // --- TASK-44: incremental hydration + updated-entries refresh ------------
+
+    #[test]
+    fn load_hydrates_only_missing_window_ids_and_reuses_the_rest() {
+        let mut server = mockito::Server::new();
+        // Fresh unread set 1,2,3; we already hold 1 and 2, so only 3 is hydrated.
+        let m_unread = server
+            .mock("GET", "/v2/unread_entries.json")
+            .with_status(200)
+            .with_body("[1, 2, 3]")
+            .create();
+        // entries.json must be requested for id 3 ONLY (the diff, AC #1).
+        let m_entries = server
+            .mock("GET", "/v2/entries.json")
+            .match_query(mockito::Matcher::UrlEncoded("ids".into(), "3".into()))
+            .with_status(200)
+            .with_body(
+                r#"[{"id":3,"feed_id":7,"title":"Three","published":"2026-06-29T00:00:03Z"}]"#,
+            )
+            .create();
+        // A missing id means a new feed might have appeared → titles are fetched.
+        let m_subs = server
+            .mock("GET", "/v2/subscriptions.json")
+            .with_status(200)
+            .with_body(r#"[{"feed_id":7,"title":"Feed Seven"}]"#)
+            .create();
+
+        let client = Client::for_test(&format!("{}/v2", server.url()));
+        let reuse: HashMap<i64, Entry> =
+            [(2, entry(2, 7, "Two", None)), (1, entry(1, 7, "One", None))]
+                .into_iter()
+                .collect();
+        let loaded = match load(&client, &Validators::default(), &reuse).unwrap() {
+            LoadOutcome::Fresh(loaded, _) => loaded,
+            LoadOutcome::NotModified => panic!("expected a fresh load"),
+        };
+        m_unread.assert();
+        m_entries.assert();
+        m_subs.assert();
+        assert_eq!(loaded.total_unread, 3);
+        assert!(loaded.pending_ids.is_empty());
+        // The full window is assembled from the one fetched + two reused entries.
+        let mut ids: Vec<i64> = loaded.entries.iter().map(|e| e.id).collect();
+        ids.sort();
+        assert_eq!(ids, vec![1, 2, 3]);
+        assert_eq!(
+            loaded.feed_titles.get(&7).map(String::as_str),
+            Some("Feed Seven")
+        );
+    }
+
+    #[test]
+    fn load_reuses_the_whole_window_and_skips_entries_and_subscriptions() {
+        let mut server = mockito::Server::new();
+        let m_unread = server
+            .mock("GET", "/v2/unread_entries.json")
+            .with_status(200)
+            .with_body("[1, 2]")
+            .create();
+        // Nothing missing → no hydration and no subscriptions round-trip (AC #1).
+        let m_entries = server.mock("GET", "/v2/entries.json").expect(0).create();
+        let m_subs = server
+            .mock("GET", "/v2/subscriptions.json")
+            .expect(0)
+            .create();
+
+        let client = Client::for_test(&format!("{}/v2", server.url()));
+        let reuse: HashMap<i64, Entry> =
+            [(2, entry(2, 7, "Two", None)), (1, entry(1, 7, "One", None))]
+                .into_iter()
+                .collect();
+        let loaded = match load(&client, &Validators::default(), &reuse).unwrap() {
+            LoadOutcome::Fresh(loaded, _) => loaded,
+            LoadOutcome::NotModified => panic!("expected a fresh load"),
+        };
+        m_unread.assert();
+        m_entries.assert();
+        m_subs.assert();
+        assert_eq!(loaded.entries.len(), 2);
+        assert!(
+            loaded.feed_titles.is_empty(),
+            "titles are skipped when nothing is missing"
+        );
+    }
+
+    #[test]
+    fn refresh_updated_rehydrates_only_cached_ids_and_drains_the_batch() {
+        let mut server = mockito::Server::new();
+        // Updated queue: id 2 (cached) + id 9 (not). Only 2 is re-hydrated, but the
+        // whole batch [2,9] is DELETEd to drain the queue (TASK-44 AC #2).
+        let m_updated = server
+            .mock("GET", "/v2/updated_entries.json")
+            .with_status(200)
+            .with_body("[2, 9]")
+            .create();
+        let m_entries = server
+            .mock("GET", "/v2/entries.json")
+            .match_query(mockito::Matcher::UrlEncoded("ids".into(), "2".into()))
+            .with_status(200)
+            .with_body(
+                r#"[{"id":2,"feed_id":7,"title":"Two (edited)","published":"2026-06-29T00:00:00Z"}]"#,
+            )
+            .create();
+        let m_delete = server
+            .mock("DELETE", "/v2/updated_entries.json")
+            .match_body(r#"{"updated_entries":[2,9]}"#)
+            .with_status(200)
+            .with_body("[2,9]")
+            .create();
+
+        let client = Client::for_test(&format!("{}/v2", server.url()));
+        let reuse: HashMap<i64, Entry> =
+            [(2, entry(2, 7, "Two", None)), (1, entry(1, 7, "One", None))]
+                .into_iter()
+                .collect();
+        let (refreshed, _v) = refresh_updated(&client, &Validators::default(), &reuse)
+            .unwrap()
+            .expect("the updated queue had changes");
+        m_updated.assert();
+        m_entries.assert();
+        m_delete.assert();
+        assert_eq!(refreshed.len(), 1, "only the cached id is re-hydrated");
+        assert_eq!(refreshed[0].id, 2);
+        assert_eq!(refreshed[0].title.as_deref(), Some("Two (edited)"));
+    }
+
+    #[test]
+    fn updated_entries_swaps_body_in_place_and_invalidates_reader_cache() {
+        let mut app = app_with(&[(7, "Feed Seven", 1)]);
+        let id = app.entries[0].id;
+        // Prime a reader cache + record the image generation so we can see them
+        // invalidated by the swap.
+        app.reader_cache = Some(ReaderCache {
+            key: (id, 40, app.image_generation),
+            text: Text::from("stale"),
+            wrapped: 1,
+        });
+        let gen_before = app.image_generation;
+
+        let refreshed = entry(id, 7, "Edited Title", Some("<p>new body</p>"));
+        app.apply(Msg::UpdatedEntries(vec![refreshed]));
+
+        assert_eq!(app.entries[0].title.as_deref(), Some("Edited Title"));
+        assert!(app.reader_cache.is_none(), "reader cache is invalidated");
+        assert_ne!(
+            app.image_generation, gen_before,
+            "image generation is bumped so the reader re-renders"
+        );
+    }
+
+    #[test]
+    fn updated_entries_for_absent_ids_is_a_no_op() {
+        // An updated id we no longer hold changes nothing (no reader invalidation).
+        let mut app = app_with(&[(7, "Feed Seven", 1)]);
+        app.reader_cache = Some(ReaderCache {
+            key: (app.entries[0].id, 40, 0),
+            text: Text::from("keep"),
+            wrapped: 1,
+        });
+        app.apply(Msg::UpdatedEntries(vec![entry(9999, 7, "Ghost", None)]));
+        assert!(
+            app.reader_cache.is_some(),
+            "no swap → the reader cache is left intact"
+        );
     }
 
     #[test]

@@ -242,6 +242,18 @@ impl Client {
         })
     }
 
+    /// Build a client pointed at a mock server, for tests in *other* modules
+    /// (e.g. the `tui` reconcile orchestration) that need to exercise the client
+    /// against `mockito` without the private `with_base_url` seam.
+    #[cfg(test)]
+    pub(crate) fn for_test(base_url: &str) -> Self {
+        let credentials = Credentials {
+            email: "reader@example.com".to_string(),
+            password: "swordfish".to_string(),
+        };
+        Self::with_base_url(&credentials, base_url).unwrap()
+    }
+
     fn url(&self, path: &str) -> String {
         format!("{}/{}", self.base_url, path)
     }
@@ -287,9 +299,32 @@ impl Client {
         &self,
         validators: &Validators,
     ) -> Result<Conditional<Vec<i64>>> {
+        self.conditional_ids("unread_entries.json", validators)
+    }
+
+    /// Like [`Client::unread_entry_ids_conditional`] but for the *updated*-entries
+    /// queue (TASK-44): the ids of entries whose content Feedbin refreshed since
+    /// we last saw them. Replays the stored `updated.*` validators; the ids are
+    /// drained via [`Client::delete_updated_entries`] once re-hydrated.
+    pub fn updated_entry_ids_conditional(
+        &self,
+        validators: &Validators,
+    ) -> Result<Conditional<Vec<i64>>> {
+        self.conditional_ids("updated_entries.json", validators)
+    }
+
+    /// Shared conditional GET of a JSON `[i64]` id list at `endpoint`, replaying
+    /// the stored `ETag`/`Last-Modified` so an unchanged list returns a cheap
+    /// `304 Not Modified`; otherwise the ids plus the fresh validators to persist
+    /// (TASK-42/44).
+    fn conditional_ids(
+        &self,
+        endpoint: &str,
+        validators: &Validators,
+    ) -> Result<Conditional<Vec<i64>>> {
         use reqwest::header::{ETAG, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED};
 
-        let mut req = self.get("unread_entries.json");
+        let mut req = self.get(endpoint);
         if let Some(etag) = &validators.etag {
             req = req.header(IF_NONE_MATCH, etag);
         }
@@ -298,7 +333,7 @@ impl Client {
         }
         let resp = req
             .send()
-            .context("requesting unread entry IDs from Feedbin")?;
+            .context("requesting an entry ID list from Feedbin")?;
         if resp.status() == reqwest::StatusCode::NOT_MODIFIED {
             return Ok(Conditional::NotModified);
         }
@@ -309,7 +344,7 @@ impl Client {
         };
         let data = resp
             .json::<Vec<i64>>()
-            .context("parsing the unread entry ID list")?;
+            .context("parsing the entry ID list")?;
         Ok(Conditional::Modified { data, validators })
     }
 
@@ -396,19 +431,37 @@ impl Client {
     /// (`DELETE /unread_entries.json`). Returns the IDs the server reports as
     /// actually changed. Batched at the 1,000-ID limit (AC #3).
     pub fn mark_read(&self, ids: &[i64]) -> Result<Vec<i64>> {
-        self.write_unread(Method::DELETE, ids)
+        self.write_entry_ids(Method::DELETE, "unread_entries.json", "unread_entries", ids)
     }
 
     /// Restore entries to unread (`POST /unread_entries.json`) — the undo for
     /// [`Client::mark_read`]. Returns the IDs the server reports as changed.
     pub fn mark_unread(&self, ids: &[i64]) -> Result<Vec<i64>> {
-        self.write_unread(Method::POST, ids)
+        self.write_entry_ids(Method::POST, "unread_entries.json", "unread_entries", ids)
     }
 
-    /// Shared body for the unread-state writes: send `{"unread_entries": [...]}`
-    /// in <=1,000-ID batches and collect the changed IDs the server echoes back.
-    /// An empty `ids` slice makes no request.
-    fn write_unread(&self, method: Method, ids: &[i64]) -> Result<Vec<i64>> {
+    /// Drain ids from the updated-entries queue (`DELETE /updated_entries.json`)
+    /// once their content has been re-hydrated, so Feedbin doesn't return them
+    /// again (TASK-44). Batched at the 1,000-id limit; returns the changed ids.
+    pub fn delete_updated_entries(&self, ids: &[i64]) -> Result<Vec<i64>> {
+        self.write_entry_ids(
+            Method::DELETE,
+            "updated_entries.json",
+            "updated_entries",
+            ids,
+        )
+    }
+
+    /// Shared body for the entry-id writes (unread + updated queues): send
+    /// `{"<key>": [...]}` in <=1,000-id batches and collect the changed ids the
+    /// server echoes back. An empty `ids` slice makes no request.
+    fn write_entry_ids(
+        &self,
+        method: Method,
+        endpoint: &str,
+        key: &str,
+        ids: &[i64],
+    ) -> Result<Vec<i64>> {
         let mut changed = Vec::new();
         for chunk in ids.chunks(MAX_UNREAD_IDS_PER_REQUEST) {
             let csv = chunk
@@ -416,18 +469,18 @@ impl Client {
                 .map(|id| id.to_string())
                 .collect::<Vec<_>>()
                 .join(",");
-            let body = format!("{{\"unread_entries\":[{csv}]}}");
+            let body = format!("{{\"{key}\":[{csv}]}}");
             let resp = self
                 .http
-                .request(method.clone(), self.url("unread_entries.json"))
+                .request(method.clone(), self.url(endpoint))
                 .basic_auth(&self.email, Some(&self.password))
                 .header(CONTENT_TYPE, "application/json; charset=utf-8")
                 .body(body)
                 .send()
-                .context("sending an unread-state write to Feedbin")?;
+                .context("sending an entry-id write to Feedbin")?;
             let batch = check_status(resp)?
                 .json::<Vec<i64>>()
-                .context("parsing the unread-state write response")?;
+                .context("parsing the entry-id write response")?;
             changed.extend(batch);
         }
         Ok(changed)
@@ -568,6 +621,72 @@ mod tests {
             Conditional::NotModified
         ));
         m304.assert();
+    }
+
+    #[test]
+    fn conditional_updated_captures_validators_then_304s() {
+        let mut server = mockito::Server::new();
+        // The updated-entries queue shares the conditional machinery (TASK-44):
+        // a first 200 yields ids + validators; replaying the ETag 304s.
+        let m200 = server
+            .mock("GET", "/v2/updated_entries.json")
+            .match_header("if-none-match", mockito::Matcher::Missing)
+            .with_status(200)
+            .with_header("etag", "\"upd9\"")
+            .with_body("[7, 8]")
+            .create();
+        let client = test_client(&server);
+        let validators = match client
+            .updated_entry_ids_conditional(&Validators::default())
+            .unwrap()
+        {
+            Conditional::Modified { data, validators } => {
+                assert_eq!(data, vec![7, 8]);
+                validators
+            }
+            Conditional::NotModified => panic!("first request should be a 200, not a 304"),
+        };
+        assert_eq!(validators.etag.as_deref(), Some("\"upd9\""));
+        m200.assert();
+
+        let m304 = server
+            .mock("GET", "/v2/updated_entries.json")
+            .match_header("if-none-match", "\"upd9\"")
+            .with_status(304)
+            .create();
+        assert!(matches!(
+            client.updated_entry_ids_conditional(&validators).unwrap(),
+            Conditional::NotModified
+        ));
+        m304.assert();
+    }
+
+    #[test]
+    fn delete_updated_entries_sends_delete_with_json_body() {
+        let mut server = mockito::Server::new();
+        // Draining the queue is a DELETE with the `updated_entries` key (TASK-44).
+        let m = server
+            .mock("DELETE", "/v2/updated_entries.json")
+            .match_header("content-type", "application/json; charset=utf-8")
+            .match_body(r#"{"updated_entries":[7,8]}"#)
+            .with_status(200)
+            .with_body("[7,8]")
+            .create();
+        let client = test_client(&server);
+        assert_eq!(client.delete_updated_entries(&[7, 8]).unwrap(), vec![7, 8]);
+        m.assert();
+    }
+
+    #[test]
+    fn empty_updated_delete_makes_no_request() {
+        let mut server = mockito::Server::new();
+        let m = server
+            .mock("DELETE", "/v2/updated_entries.json")
+            .expect(0)
+            .create();
+        let client = test_client(&server);
+        assert!(client.delete_updated_entries(&[]).unwrap().is_empty());
+        m.assert();
     }
 
     #[test]
