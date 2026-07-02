@@ -214,6 +214,10 @@ struct App {
     /// — TASK-45). Set once from config; `accent()` layers the help-overlay mute
     /// on top. Chrome only — the "all caught up" rose mascot keeps its own palette.
     base_accent: Color,
+    /// Whether to fetch images from third-party hosts. `false` (config
+    /// `load_remote_images = false`) suppresses every image request and shows a
+    /// placeholder instead, so the reader's IP never reaches trackers (TASK-39).
+    load_remote_images: bool,
     should_quit: bool,
 }
 
@@ -242,6 +246,7 @@ impl App {
             pending_confirm: None,
             show_help: false,
             base_accent: theme::ROSE,
+            load_remote_images: true,
             should_quit: false,
         }
     }
@@ -338,6 +343,13 @@ impl App {
     /// top-to-bottom (oldest first) — marking each `Loading` so it is fetched
     /// once.
     fn refill_image_queue(&mut self) {
+        // Privacy switch (TASK-39): with remote images off we enqueue nothing, so
+        // no image HTTP request is ever issued (this is the sole place images are
+        // queued) and `image_urls` stays empty (no "N of M" indicator). The reader
+        // shows a placeholder for each image instead — see `push_image`.
+        if !self.load_remote_images {
+            return;
+        }
         let source_ids: Vec<i64> = self.sources().into_iter().map(|(id, _)| id).collect();
         // Record every distinct image URL of the current load (in on-screen
         // order) for the progress count, queueing the ones not yet cached.
@@ -1103,8 +1115,15 @@ impl App {
         let Some(entry) = self.entries.iter().find(|e| e.id == entry_id) else {
             return false;
         };
-        // `base_accent` is constant for the process, so it needn't key the cache.
-        let text = reader_text(entry, &self.images, width, self.base_accent);
+        // `base_accent` and `load_remote_images` are constant for the process, so
+        // they needn't key the cache.
+        let text = reader_text(
+            entry,
+            &self.images,
+            width,
+            self.base_accent,
+            self.load_remote_images,
+        );
         let wrapped = Paragraph::new(text.clone())
             .wrap(Wrap { trim: false })
             .line_count(width) as u16;
@@ -1548,7 +1567,15 @@ fn push_image(
     url: &str,
     images: &HashMap<String, ImageState>,
     max_width: u16,
+    remote_images: bool,
 ) {
+    // Remote images disabled (TASK-39): the URL was never fetched (see
+    // `refill_image_queue`), so show a placeholder rather than a perpetual
+    // "loading…" — the reader still surfaces the URL if the user wants it.
+    if !remote_images {
+        lines.push(Line::from(format!("[remote images off: {url}]")).dim());
+        return;
+    }
     match images.get(url) {
         Some(ImageState::Ready(art)) => {
             lines.push(Line::from(""));
@@ -1608,6 +1635,7 @@ fn reader_text(
     images: &HashMap<String, ImageState>,
     max_width: u16,
     accent: Color,
+    remote_images: bool,
 ) -> Text<'static> {
     let mut lines: Vec<Line> = Vec::new();
     let title = strip_control_chars(entry.title.as_deref().unwrap_or("(untitled)"));
@@ -1662,7 +1690,7 @@ fn reader_text(
     // unchanged and metadata-only feeds still get a picture.
     let has_inline_image = blocks.iter().any(|b| matches!(b, Segment::Image(_)));
     if !has_inline_image && let Some(url) = entry.lead_image_url() {
-        push_image(&mut lines, url, images, max_width);
+        push_image(&mut lines, url, images, max_width, remote_images);
     }
     for block in blocks {
         match block {
@@ -1671,7 +1699,7 @@ fn reader_text(
                     lines.push(Line::from(line.to_string()));
                 }
             }
-            Segment::Image(url) => push_image(&mut lines, &url, images, max_width),
+            Segment::Image(url) => push_image(&mut lines, &url, images, max_width, remote_images),
         }
     }
     Text::from(lines)
@@ -2051,6 +2079,9 @@ pub fn run(client: Client) -> Result<()> {
         .as_deref()
         .and_then(theme::parse_hex)
         .unwrap_or(theme::ROSE);
+    // Privacy: `load_remote_images = false` suppresses all image fetches (TASK-39);
+    // any config error falls back to the default-on behavior.
+    let load_remote_images = crate::config::load_remote_images().unwrap_or(true);
 
     let (tx, mut rx) = mpsc::unbounded_channel::<Msg>();
 
@@ -2065,6 +2096,7 @@ pub fn run(client: Client) -> Result<()> {
             browser_pref: &browser_pref,
             refresh_interval,
             accent,
+            load_remote_images,
         },
     );
     ratatui::restore();
@@ -2105,6 +2137,8 @@ struct UiConfig<'a> {
     refresh_interval: Option<Duration>,
     /// Resolved accent color — rose default or the user's override (TASK-45).
     accent: Color,
+    /// Whether to fetch third-party images; `false` disables them (TASK-39).
+    load_remote_images: bool,
 }
 
 fn run_loop(
@@ -2119,9 +2153,11 @@ fn run_loop(
         browser_pref,
         refresh_interval,
         accent,
+        load_remote_images,
     } = config;
     let mut app = App::new();
     app.base_accent = accent;
+    app.load_remote_images = load_remote_images;
     // Open the offline cache and paint from it immediately (TASK-41); a cache
     // failure is non-fatal — roses just runs without persistence.
     let mut store = Store::open().ok();
@@ -3016,7 +3052,7 @@ mod tests {
             json_feed: None,
         };
         let collect = |images: &HashMap<String, ImageState>| -> String {
-            reader_text(&entry, images, 80, theme::ROSE)
+            reader_text(&entry, images, 80, theme::ROSE, true)
                 .lines
                 .iter()
                 .flat_map(|line| line.spans.iter().map(|span| span.content.to_string()))
@@ -3036,7 +3072,7 @@ mod tests {
 
     /// Flatten a rendered reader `Text` into one newline-joined string.
     fn render_reader(entry: &Entry) -> String {
-        reader_text(entry, &HashMap::new(), 80, theme::ROSE)
+        reader_text(entry, &HashMap::new(), 80, theme::ROSE, true)
             .lines
             .iter()
             .flat_map(|line| line.spans.iter().map(|span| span.content.to_string()))
@@ -3350,7 +3386,7 @@ mod tests {
         images.insert(url.to_string(), ImageState::Ready(vec![wide]));
 
         // Render into a reader only 6 columns wide.
-        let text = reader_text(&entry, &images, 6, theme::ROSE);
+        let text = reader_text(&entry, &images, 6, theme::ROSE, true);
         for line in &text.lines {
             let w: usize = line.spans.iter().map(|s| s.content.width()).sum();
             assert!(
@@ -3423,6 +3459,55 @@ mod tests {
             app.images.get("https://x/2.png"),
             Some(ImageState::Loading)
         ));
+    }
+
+    #[test]
+    fn remote_images_disabled_enqueues_no_fetches() {
+        // TASK-39 AC #3: with remote images off, loading a batch of image-bearing
+        // entries queues nothing — no fetch is ever issued and the "N of M"
+        // indicator stays empty.
+        let mut feed_titles = HashMap::new();
+        feed_titles.insert(7, "Feed".to_string());
+        let entries = vec![
+            img_entry(1, 7, "https://x/1.png"),
+            img_entry(2, 7, "https://x/2.png"),
+        ];
+        let mut app = App::new();
+        app.load_remote_images = false;
+        app.apply(Msg::Loaded(Ok(Loaded {
+            entries,
+            feed_titles,
+            total_unread: 2,
+            pending_ids: Vec::new(),
+        })));
+        assert!(app.image_queue.is_empty(), "no image is queued for fetch");
+        assert!(app.image_urls.is_empty(), "no loading indicator is driven");
+        assert!(
+            app.images.is_empty(),
+            "no URL is marked Loading in the cache"
+        );
+        assert_eq!(app.image_progress(), None, "nothing is 'loading N of M'");
+    }
+
+    #[test]
+    fn remote_images_disabled_renders_placeholder_not_loading() {
+        // The reader shows a clear placeholder for each image instead of a
+        // perpetual "loading…", and still surfaces the URL.
+        let entry = img_entry(1, 7, "https://x/hero.png");
+        let images = HashMap::new();
+        let flat: String = reader_text(&entry, &images, 80, theme::ROSE, false)
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        assert!(
+            flat.contains("[remote images off: https://x/hero.png]"),
+            "placeholder names the blocked URL; got: {flat}"
+        );
+        assert!(
+            !flat.contains("image loading"),
+            "not shown as loading when disabled"
+        );
     }
 
     #[test]
@@ -3524,7 +3609,7 @@ mod tests {
 
     /// Flatten a rendered reader into a newline-joined string.
     fn flatten_reader(entry: &Entry, images: &HashMap<String, ImageState>) -> String {
-        reader_text(entry, images, 80, theme::ROSE)
+        reader_text(entry, images, 80, theme::ROSE, true)
             .lines
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))

@@ -140,6 +140,7 @@ browser = "w3m %s"          # command template: %s / {url} placeholder, else URL
 browser_terminal = true     # roses suspends/restores the TUI around a terminal browser
 refresh_interval_secs = 300 # background auto-refresh cadence; omit/0 = off (TASK-37)
 highlight_color = "#e06c9a" # UI accent override; hex #rrggbb / #rgb; invalid/unset = rose (TASK-45)
+load_remote_images = true   # fetch third-party images; false = block all + placeholder (TASK-39)
 ```
 
 | Field | Type | Notes |
@@ -149,6 +150,7 @@ highlight_color = "#e06c9a" # UI accent override; hex #rrggbb / #rgb; invalid/un
 | `browser_terminal` | `Option<bool>` | Whether `browser` runs in the terminal (default false). |
 | `refresh_interval_secs` | `Option<u64>` | Background auto-refresh interval in seconds; `None`/`0` disables it (default). Sub-60 s values are clamped up to a 60 s politeness floor (`MIN_REFRESH_SECS`) by `load_refresh_interval()` (TASK-37). |
 | `highlight_color` | `Option<String>` | UI accent color as a hex string (`#rrggbb`/`rrggbb` or 3-digit `#rgb`). Resolved to a `Color` by `theme::parse_hex`; unset or unparseable falls back to `theme::ROSE`. Recolors chrome only — the "all caught up" rose mascot keeps its own palette (TASK-45). |
+| `load_remote_images` | `Option<bool>` | Whether to fetch inline/lead images from third-party hosts. `false` blocks every image request (no IP leak to trackers) and the reader shows a `[remote images off: <url>]` placeholder; unset/`true` loads images as usual (default). Read by `load_remote_images()` (TASK-39). |
 
 **No password is ever written here** (a unit test asserts the serialized settings never contain
 "password"). The `config.toml` filename is `.gitignore`d defensively.

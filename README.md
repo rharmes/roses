@@ -69,6 +69,12 @@ refresh_interval_secs = 300
 # the shorthand #rgb (the leading # is optional). Omit or set an invalid value
 # to keep the default rose. The "all caught up" rose art always stays rose.
 highlight_color = "#e06c9a"
+
+# Privacy: whether to fetch inline and lead images from the third-party hosts a
+# feed names. Set false to block every image request — roses never contacts
+# those hosts (so your IP isn't leaked to trackers) and shows a placeholder in
+# the reader instead. Omit or set true (the default) to load images normally.
+load_remote_images = true
 ```
 
 ## Keyboard shortcuts
