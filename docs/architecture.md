@@ -85,13 +85,28 @@ So `App` is only ever touched on the main thread; background threads communicate
 
 ### Background tasks (`spawn_*`)
 
-- `spawn_fetch` → `load(client, validators)`: a **conditional** `unread_entry_ids_conditional()` replaying
-  the stored `ETag`/`Last-Modified` (TASK-42). A **`304`** → `Msg::NotModified` (keep the current view, no
-  further fetch). A **`200`** → sort desc, hydrate newest `DISPLAY_LIMIT` (50) via `feed_titles()` +
-  `entries(&sample)` → sort by `published` desc → `Msg::Loaded`, then `Msg::Validators` with the fresh
-  validators to persist; the remaining ids ride along as `pending_ids` for lazy hydration (TASK-40). The
-  main thread reads the validators from the cache before spawning and writes the new ones back in
-  `persist_msg`, so the `Store` stays single-threaded.
+- `spawn_fetch` runs **two** reconciles on one blocking task, each passed a **`reuse` pool** — the entries
+  the main thread already holds in memory, keyed by id (`reuse_pool(&app)`; the loaded projection of the
+  cache, so "already cached" = "reuse it"):
+  - **Unread reconcile — `load(client, unread_validators, reuse)`** — a **conditional**
+    `unread_entry_ids_conditional()` replaying the stored `ETag`/`Last-Modified` (TASK-42). A **`304`** →
+    `Msg::NotModified` (keep the current view). A **`200`** → sort desc, take the newest `DISPLAY_LIMIT` (50)
+    window, and **hydrate incrementally** (TASK-44): `entries(&missing)` fetches only the window ids *not*
+    already in `reuse`, then the full window is assembled from freshly-fetched + reused bodies, sorted by
+    `published` desc → `Msg::Loaded`, then `Msg::Validators{ endpoint: "unread", … }`. So the common tick
+    that adds one entry hydrates just that one. `feed_titles()` is fetched **only when something is missing**
+    (a new feed needs a new entry); when nothing's missing it's skipped and `apply` keeps the existing
+    titles. The remaining ids ride along as `pending_ids` for lazy hydration (TASK-40).
+  - **Content refresh — `refresh_updated(client, updated_validators, reuse)`** (TASK-44 AC #2) — a
+    conditional `updated_entry_ids_conditional()` (its own `updated.*` validators). It **re-hydrates only the
+    updated ids we currently hold** (`entries(&(updated ∩ reuse))`), then **DELETEs the whole returned batch**
+    (`delete_updated_entries`) to drain the queue, and emits `Msg::UpdatedEntries` (in-place body swap) +
+    `Msg::Validators{ endpoint: "updated", … }`. It runs **after** the unread reconcile so a body swap lands
+    on top of any reused (stale) body, and even when unread `304`s (a content edit doesn't change the unread
+    set). Best-effort — a failure here never fails the unread reconcile.
+
+  The main thread reads both endpoints' validators from the cache before spawning and writes the new ones
+  back in `persist_msg` (`store.set_validators(endpoint, …)`), so the `Store` stays single-threaded.
 - `spawn_load_more` → `entries(&ids)` for the next `LOAD_MORE_BATCH` (100) pending ids → `Msg::LoadedMore`
   (appended then re-sorted by `published`). **Pagination is hydrate-on-demand:** `unread_entries.json`
   already returns the *complete* unread id list, so roses just hydrates more of it as the reader nears the
@@ -120,6 +135,9 @@ tests point at a mockito server.
 | --- | --- | --- |
 | `authenticate()` | `GET /authentication.json` | 200 ⇒ ok; 401 ⇒ clear error. |
 | `unread_entry_ids()` | `GET /unread_entries.json` | `Vec<i64>` — source of truth for unread state. |
+| `unread_entry_ids_conditional(v)` | `GET /unread_entries.json` | Conditional (ETag/Last-Modified) → `Conditional<Vec<i64>>`; `304` ⇒ unchanged (TASK-42). |
+| `updated_entry_ids_conditional(v)` | `GET /updated_entries.json` | Same conditional shape for the *updated-content* queue (TASK-44). |
+| `delete_updated_entries(&[i64])` | `DELETE /updated_entries.json` | Drain re-hydrated updated ids so they don't return; `{"updated_entries":[…]}`, batched at 1000 (TASK-44). |
 | `entries(&[i64])` | `GET /entries.json?ids=…&mode=extended` | Hydrate `Entry`s, batched at 100 ids/request; `mode=extended` adds the images/enclosure/json_feed objects. |
 | `subscriptions()` | `GET /subscriptions.json` | `Vec<Subscription>` (feed id + title + feed/site URLs). |
 | `feed_titles()` | `GET /subscriptions.json` | `HashMap<feed_id, title>` (null titles dropped); a thin wrapper over `subscriptions()`. |
@@ -130,7 +148,9 @@ tests point at a mockito server.
 
 `check_status()` centralizes error mapping: success passes through; 401 → "rejected the stored
 credentials… run `roses logout`"; other non-2xx → `HTTP <status>: <body snippet>`. Write bodies are sent
-as `{"unread_entries":[…]}` with `Content-Type: application/json; charset=utf-8`.
+as `{"<queue>":[…]}` with `Content-Type: application/json; charset=utf-8`. The two conditional id-list
+fetches share a private `conditional_ids(endpoint, v)` helper, and the three id-writes (mark read/unread +
+drain-updated) share `write_entry_ids(method, endpoint, key, ids)`.
 
 > **Security:** entry **images** are fetched by `images.rs` with a *separate, unauthenticated* reqwest
 > client — the Feedbin Basic-auth credentials are never replayed to third-party image hosts.
@@ -417,8 +437,11 @@ while the two client calls are covered by mockito.
 A blocking **SQLite** cache under the XDG data dir makes the TUI **offline-first**: `run_loop` paints from
 the cache on launch, then the background load reconciles it (Feedbin stays the source of truth for read
 state). All cache writes happen on the main thread in `persist_msg` as messages drain, so the `Connection`
-never crosses threads. Full schema, sync strategy, and the `rusqlite`/musl trade-off are in
-[`persistence.md`](persistence.md).
+never crosses threads. Write-throughs: `replace_snapshot` (reconcile a fetch), `upsert_entries` (append a
+load-more batch), `set_unread` (mark/undo), and — for the TASK-44 content refresh — `refresh_entries`,
+which updates a cached entry's JSON body **without touching its `unread`/`starred` flags** and only for ids
+already present (`UPDATE … WHERE id = ?`), so a content edit never resurrects a read entry. Full schema,
+sync strategy, and the `rusqlite`/musl trade-off are in [`persistence.md`](persistence.md).
 
 ## Dependencies (why)
 

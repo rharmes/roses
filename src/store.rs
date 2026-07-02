@@ -203,6 +203,39 @@ impl Store {
         Ok(())
     }
 
+    /// Refresh the cached body of already-cached entries whose content Feedbin
+    /// updated (TASK-44), **preserving read/star state**: only the JSON blob,
+    /// `published`, and `feed_id` are updated, via an `UPDATE ... WHERE id = ?`
+    /// that no-ops on ids we don't have (we only refresh what we display). This is
+    /// deliberately not an upsert — an uncached updated id shouldn't be inserted
+    /// as unread.
+    pub fn refresh_entries(&mut self, entries: &[Entry]) -> Result<()> {
+        let tx = self
+            .conn
+            .transaction()
+            .context("beginning a cache transaction")?;
+        {
+            let mut stmt = tx
+                .prepare(
+                    "UPDATE entries SET feed_id = ?2, published = ?3, json = ?4
+                     WHERE id = ?1",
+                )
+                .context("preparing the entry refresh")?;
+            for entry in entries {
+                let json = serde_json::to_string(entry).context("serializing an entry")?;
+                stmt.execute(rusqlite::params![
+                    entry.id,
+                    entry.feed_id,
+                    entry.published,
+                    json
+                ])
+                .context("refreshing a cached entry")?;
+            }
+        }
+        tx.commit().context("committing refreshed entries")?;
+        Ok(())
+    }
+
     /// Write-through a read/unread change for one entry (mark-read / undo).
     pub fn set_unread(&self, id: i64, unread: bool) -> Result<()> {
         self.conn
@@ -406,6 +439,50 @@ mod tests {
         s.upsert_entries(&[entry(2, 7, "2026-01-02"), entry(1, 7, "2026-01-01")])
             .unwrap();
         assert_eq!(s.load_unread(50).unwrap().entries.len(), 3);
+    }
+
+    #[test]
+    fn refresh_entries_updates_body_but_preserves_read_and_star_state() {
+        let mut s = mem_store();
+        s.replace_snapshot(&[entry(1, 7, "2026-01-01")], &HashMap::new(), &[1])
+            .unwrap();
+        // Mark it read and star it (star written directly — TASK-29 wires the API).
+        s.set_unread(1, false).unwrap();
+        s.conn
+            .execute("UPDATE entries SET starred = 1 WHERE id = 1", [])
+            .unwrap();
+
+        // A content refresh with a new title for the cached id, plus an id we do
+        // NOT have cached (must be ignored, not inserted).
+        let mut edited = entry(1, 7, "2026-01-01");
+        edited.title = Some("E1 (edited)".to_string());
+        s.refresh_entries(&[edited, entry(99, 7, "2026-09-09")])
+            .unwrap();
+
+        // Read + star state is untouched...
+        let (unread, starred): (i64, i64) = s
+            .conn
+            .query_row(
+                "SELECT unread, starred FROM entries WHERE id = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(unread, 0, "refresh preserves read state");
+        assert_eq!(starred, 1, "refresh preserves star state");
+        // ...but the body was refreshed (visible once restored to unread).
+        s.set_unread(1, true).unwrap();
+        let snap = s.load_unread(50).unwrap();
+        assert_eq!(snap.entries.len(), 1);
+        assert_eq!(snap.entries[0].title.as_deref(), Some("E1 (edited)"));
+        // The uncached id was not inserted by the refresh.
+        let count: i64 = s
+            .conn
+            .query_row("SELECT COUNT(*) FROM entries WHERE id = 99", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 0, "refresh does not insert uncached ids");
     }
 
     #[test]

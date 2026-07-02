@@ -112,9 +112,10 @@ recomputed from the ids each frame (`source_index`, `article_index`).
   - `Image { url: String, result: Result<Vec<Line<'static>>, String> }`
   - `LoadedMore(Result<Vec<Entry>, String>)` — a lazily-hydrated older batch to append (TASK-40).
   - `NotModified` — the conditional unread fetch 304'd; keep the current view (TASK-42).
-  - `Validators(feedbin::Validators)` — fresh `ETag`/`Last-Modified` to persist; no UI effect (TASK-42).
-- `LoadOutcome { NotModified, Fresh(Loaded, Validators) }` — what `load()` returns to `spawn_fetch` (TASK-42).
-- `feedbin::Validators { etag: Option<String>, last_modified: Option<String> }` + `Conditional<T> { NotModified, Modified { data, validators } }` — HTTP-caching types; stored in the cache's `meta` table under `unread.etag` / `unread.last_modified`.
+  - `UpdatedEntries(Vec<Entry>)` — entries whose content Feedbin refreshed; their bodies are swapped into place by id, leaving the unread set + read state untouched (TASK-44).
+  - `Validators { endpoint: &'static str, validators: feedbin::Validators }` — fresh `ETag`/`Last-Modified` for `endpoint` (`"unread"` / `"updated"`) to persist; no UI effect (TASK-42/44).
+- `LoadOutcome { NotModified, Fresh(Loaded, Validators) }` — what `load()` returns to `spawn_fetch` (TASK-42). `load()` also takes a `reuse: &HashMap<i64, Entry>` (the in-memory entries) and hydrates only window ids absent from it (TASK-44); `refresh_updated()` returns `Option<(Vec<Entry>, Validators)>` (`None` = 304).
+- `feedbin::Validators { etag: Option<String>, last_modified: Option<String> }` + `Conditional<T> { NotModified, Modified { data, validators } }` — HTTP-caching types; stored in the cache's `meta` table under `unread.etag`/`unread.last_modified` and `updated.etag`/`updated.last_modified` (TASK-42/44).
 - `WriteOp { MarkRead, Undo }` — which unread-state write a `spawn_write` performed.
 - `Undone { batch: Vec<(Entry, usize)> }` — an undoable mark-read: the entries + their positions in `entries`, restored as a unit so one `u` reverses a bulk mark (TASK-30).
 - `Action { None, Reload, MarkRead, MarkSourceRead, MarkWindowRead, Undo, OpenInBrowser }` — what a keypress asks the loop to do (`MarkSourceRead`=`M`, `MarkWindowRead`=`A`; TASK-30).
@@ -139,9 +140,11 @@ states: `Ready` → the art lines; `Failed` → `[image unavailable: <url>]`; ot
 
 A local SQLite DB at `$XDG_DATA_HOME/roses/roses.db` (or `~/.local/share/roses/roses.db`) caches feeds,
 entries, and read state so the TUI paints instantly and reads offline. Tables: `meta(key, value)` (schema
-version + the TASK-42 HTTP validators `unread.etag`/`unread.last_modified`), `feeds(feed_id, title)`, and `entries(id, feed_id, published, unread,
+version + the HTTP validators `unread.etag`/`unread.last_modified` and `updated.etag`/`updated.last_modified`
+— TASK-42/44), `feeds(feed_id, title)`, and `entries(id, feed_id, published, unread,
 starred, json)` — scalar columns for the unread query/sort plus a serialized-`Entry` JSON blob for full
-hydration. `starred` exists from v1 but is wired by TASK-29. `store::CachedSnapshot { entries, feed_titles,
+hydration. `starred` exists from v1 but is wired by TASK-29. `refresh_entries()` updates the JSON body of
+already-cached ids **without touching `unread`/`starred`** for the TASK-44 content refresh. `store::CachedSnapshot { entries, feed_titles,
 total_unread }` is the initial-paint payload. Feedbin stays the source of truth for read state; full schema
 + sync strategy are in [`persistence.md`](persistence.md).
 
@@ -203,7 +206,9 @@ password) on every request** — no tokens. Full spec: <https://github.com/feedb
 | Endpoint | roses use | Request / response |
 | --- | --- | --- |
 | `GET /authentication.json` | validate login | 200 valid / 401 invalid. |
-| `GET /unread_entries.json` | unread ids | → `[i64, …]` (source of truth). |
+| `GET /unread_entries.json` | unread ids | → `[i64, …]` (source of truth); conditional (ETag/Last-Modified) for the 304 fast-path (TASK-42). |
+| `GET /updated_entries.json` | changed-content ids | → `[i64, …]`; conditional; re-hydrated + drained for the content refresh (TASK-44). |
+| `DELETE /updated_entries.json` | drain updated queue | body `{"updated_entries":[…]}`, ≤1000 ids; clears processed updated ids (TASK-44). |
 | `GET /entries.json?ids=…&mode=extended` | hydrate entries | ≤100 ids/request; `mode=extended` adds `images`/`enclosure`/`json_feed`; → `[Entry-shaped objects]`. |
 | `GET /subscriptions.json` | feed names + export | → objects with `feed_id`, `title`, `feed_url`, `site_url`. |
 | `DELETE /unread_entries.json` | mark read | body `{"unread_entries":[…]}`, ≤1000 ids; → changed ids. |
