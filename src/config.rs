@@ -42,6 +42,10 @@ struct Settings {
     /// Accent color as a hex string (`#rrggbb`/`#rgb`), overriding the rose
     /// default. Unset or unparseable falls back to rose (TASK-45).
     highlight_color: Option<String>,
+    /// Whether to fetch inline/lead images from third-party hosts. `false`
+    /// disables all remote image requests (privacy); unset defaults to `true`
+    /// (TASK-39).
+    load_remote_images: Option<bool>,
 }
 
 /// The user's browser preference from config. `$BROWSER` and the platform
@@ -187,6 +191,13 @@ pub fn load_highlight_color() -> Result<Option<String>> {
     Ok(load_settings()?.highlight_color)
 }
 
+/// Whether remote (third-party) image fetching is enabled. Defaults to `true`
+/// when unset; `load_remote_images = false` disables all image requests so the
+/// reader never leaks the reader's IP to trackers (TASK-39).
+pub fn load_remote_images() -> Result<bool> {
+    Ok(load_settings()?.load_remote_images.unwrap_or(true))
+}
+
 /// Load the user's browser preference from the config file (empty if unset).
 pub fn load_browser_pref() -> Result<BrowserPref> {
     let settings = load_settings()?;
@@ -302,6 +313,22 @@ mod tests {
         let text = toml::to_string_pretty(&settings).unwrap();
         let parsed: Settings = toml::from_str(&text).unwrap();
         assert_eq!(parsed.highlight_color.as_deref(), Some("#af5f87"));
+    }
+
+    #[test]
+    fn load_remote_images_round_trips_and_defaults_to_true() {
+        // Unset → the parser leaves `None`, which callers read as enabled.
+        let default: Settings = toml::from_str("").unwrap();
+        assert_eq!(default.load_remote_images, None);
+        assert!(default.load_remote_images.unwrap_or(true));
+
+        let settings = Settings {
+            load_remote_images: Some(false),
+            ..Default::default()
+        };
+        let text = toml::to_string_pretty(&settings).unwrap();
+        let parsed: Settings = toml::from_str(&text).unwrap();
+        assert_eq!(parsed.load_remote_images, Some(false));
     }
 
     #[test]

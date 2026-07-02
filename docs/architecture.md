@@ -330,6 +330,14 @@ freeze the frame) — reserving its columns via a `Layout` split so it never ove
 frame (`spinner_tick`) is advanced once per `run_loop` iteration, which ticks ~every 100 ms regardless of
 input, so it animates on its own.
 
+**Privacy: remote-image toggle (TASK-39).** `App.load_remote_images` (from config `load_remote_images`,
+default `true`) is the single privacy switch. `refill_image_queue()` — the *only* place images are queued —
+early-returns when it's off, so no image HTTP request is ever issued (the reader's IP never reaches
+third-party hosts) and `image_urls` stays empty (no "N of M" indicator). The reader then shows a dim
+`[remote images off: <url>]` placeholder via `push_image()`, which takes the flag and short-circuits ahead
+of the cache lookup. Like `base_accent`, the flag is constant for the process, so it doesn't key the reader
+cache.
+
 > **Approach note:** images render *into the reader text* as half-block `Line`s rather than via the
 > `ratatui-image` widget, so they flow inline within the single scrolling reader `Paragraph`. This is a
 > deliberate, approved deviation from the research doc's "prefer ratatui-image".
@@ -349,9 +357,11 @@ redraw.
 - Config dir: `$XDG_CONFIG_HOME/roses` if set & non-empty, else `~/.config/roses` (honored on macOS too).
 - `config.toml` holds non-secret `Settings`: `email`, `browser`, `browser_terminal`,
   `refresh_interval_secs` (auto-refresh cadence; `load_refresh_interval()` maps it to an `Option<Duration>`,
-  disabling on unset/zero and clamping sub-60 s up to a politeness floor — TASK-37), and `highlight_color`
+  disabling on unset/zero and clamping sub-60 s up to a politeness floor — TASK-37), `highlight_color`
   (accent override; `load_highlight_color()` returns the raw hex string, resolved to a `Color` by
-  `theme::parse_hex` with a rose fallback — TASK-45). (`.gitignore`s `config.toml` defensively.)
+  `theme::parse_hex` with a rose fallback — TASK-45), and `load_remote_images` (privacy switch;
+  `load_remote_images()` returns the `bool`, default `true`, gating all image fetches — TASK-39).
+  (`.gitignore`s `config.toml` defensively.)
 - The **password lives only in the OS keychain** (`keyring`, service `"roses"`, username = email). The
   backend is **cfg-gated per platform**: macOS uses the native Keychain (`apple-native-keyring-store`),
   Linux the Secret Service via the pure-Rust *zbus* backend (`zbus-secret-service-keyring-store`, so the
