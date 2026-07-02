@@ -1,11 +1,11 @@
 ---
 id: TASK-44
 title: 'Delta sync (part 2): incremental hydration + updated_entries refresh'
-status: In Progress
+status: Done
 assignee:
   - '@ross'
 created_date: '2026-07-01 18:52'
-updated_date: '2026-07-02 18:25'
+updated_date: '2026-07-02 18:59'
 labels:
   - feature
   - feedbin-api
@@ -47,3 +47,9 @@ Follow-up to TASK-42 (which did the ETag/Last-Modified 304 fast-path). On a 200 
 <!-- SECTION:NOTES:BEGIN -->
 Implemented. AC#1: load() takes a reuse pool (in-memory entries) and hydrates only newest-window ids absent from it, assembling the window from fetched+reused; skips the subscriptions.json feed-titles fetch when nothing is missing. AC#2: refresh_updated() conditionally fetches updated_entries.json, re-hydrates only the ids we hold, DELETEs the whole batch to drain, and emits Msg::UpdatedEntries (in-place body swap) — runs even on a 304-unread. Both share one blocking task in spawn_fetch. New feedbin methods updated_entry_ids_conditional + delete_updated_entries (shared conditional_ids/write_entry_ids helpers); store.refresh_entries preserves unread/starred; validators generalized per endpoint (unread/updated). Covered by 3 feedbin + 1 store + 5 tui mockito/unit tests; suite 145 pass, 10x stable, fmt+clippy clean.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Delta sync part 2 shipped. AC#1: incremental hydration — load() reuses in-memory entries and fetches only newest-window ids not already held; skips subscriptions.json when nothing is missing. AC#2: refresh_updated() consumes updated_entries.json (own validators), re-hydrates only ids we hold, DELETEs the whole batch to drain, and swaps bodies in place via Msg::UpdatedEntries (runs even on a 304-unread). New feedbin methods (updated_entry_ids_conditional, delete_updated_entries) share conditional_ids/write_entry_ids helpers; store.refresh_entries preserves unread/starred. 9 tests, suite 145 pass/10x stable, fmt+clippy clean. Merged in PR #34.
+<!-- SECTION:FINAL_SUMMARY:END -->
