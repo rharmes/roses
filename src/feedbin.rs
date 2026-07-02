@@ -114,12 +114,18 @@ impl Entry {
     }
 }
 
-/// One Feedbin subscription. Used only to map a `feed_id` to its display title;
-/// the other fields (id, feed_url, site_url, created_at) are ignored.
+/// One Feedbin subscription. Drives both the `feed_id`→title map the TUI uses
+/// and the OPML export (TASK-38), which needs the feed and site URLs. Feedbin
+/// sends `title`/`feed_url`/`site_url` nullable, so they're `Option`; the `id`
+/// and `created_at` fields are ignored (`Deserialize` drops unknown fields).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct Subscription {
-    feed_id: i64,
-    title: Option<String>,
+pub struct Subscription {
+    pub feed_id: i64,
+    pub title: Option<String>,
+    /// The feed's URL (OPML `xmlUrl`).
+    pub feed_url: Option<String>,
+    /// The feed's website URL (OPML `htmlUrl`).
+    pub site_url: Option<String>,
 }
 
 /// HTTP cache validators for a Feedbin GET response (TASK-42). Replayed as
@@ -136,6 +142,59 @@ pub struct Validators {
 pub enum Conditional<T> {
     NotModified,
     Modified { data: T, validators: Validators },
+}
+
+/// An OPML import job (TASK-38). Feedbin processes uploads asynchronously, so a
+/// `create_import` starts one and `import_status` polls it until `complete`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Import {
+    pub id: i64,
+    pub complete: bool,
+    /// Per-feed results; absent on the list endpoint, so default to empty.
+    #[serde(default)]
+    pub import_items: Vec<ImportItem>,
+}
+
+/// One feed's result within an [`Import`]. `status` is `"pending"`, `"complete"`,
+/// or `"failed"` (kept as a string — Feedbin owns the vocabulary). Feedbin also
+/// sends a `title`, but the summary keys off the feed URL, so it's not modelled
+/// (`Deserialize` drops unknown fields).
+#[derive(Debug, Clone, Deserialize)]
+pub struct ImportItem {
+    pub feed_url: Option<String>,
+    pub status: String,
+}
+
+/// A count of an import's per-feed outcomes, plus the URLs that failed — the
+/// data `roses import` prints as its summary. Pure over an [`Import`] so the
+/// CLI's formatting stays testable without hitting the network.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ImportTally {
+    pub complete: usize,
+    pub pending: usize,
+    pub failed: usize,
+    pub failed_urls: Vec<String>,
+}
+
+impl Import {
+    /// Tally the import's items by status, collecting the feed URLs that failed.
+    pub fn tally(&self) -> ImportTally {
+        let mut tally = ImportTally::default();
+        for item in &self.import_items {
+            match item.status.as_str() {
+                "complete" => tally.complete += 1,
+                "failed" => {
+                    tally.failed += 1;
+                    if let Some(url) = &item.feed_url {
+                        tally.failed_urls.push(url.clone());
+                    }
+                }
+                // "pending" or any unfamiliar status Feedbin adds later.
+                _ => tally.pending += 1,
+            }
+        }
+        tally
+    }
 }
 
 /// A blocking Feedbin v2 client bound to one set of credentials. Cloning is
@@ -283,17 +342,54 @@ impl Client {
     /// shown with the feed they came from. Feeds with no title are omitted and
     /// fall back to a placeholder at render time.
     pub fn feed_titles(&self) -> Result<HashMap<i64, String>> {
+        Ok(self
+            .subscriptions()?
+            .into_iter()
+            .filter_map(|s| s.title.map(|title| (s.feed_id, title)))
+            .collect())
+    }
+
+    /// Fetch the full subscription list (`GET /subscriptions.json`) — feed id,
+    /// title, and the feed/site URLs. Drives both `feed_titles()` and the OPML
+    /// export (TASK-38).
+    pub fn subscriptions(&self) -> Result<Vec<Subscription>> {
         let resp = self
             .get("subscriptions.json")
             .send()
             .context("requesting subscriptions from Feedbin")?;
-        let subscriptions = check_status(resp)?
+        check_status(resp)?
             .json::<Vec<Subscription>>()
-            .context("parsing the subscriptions response")?;
-        Ok(subscriptions
-            .into_iter()
-            .filter_map(|s| s.title.map(|title| (s.feed_id, title)))
-            .collect())
+            .context("parsing the subscriptions response")
+    }
+
+    /// Start an OPML import by uploading the raw OPML file
+    /// (`POST /imports.json`, `Content-Type: text/xml`). Feedbin parses the OPML
+    /// server-side and processes it asynchronously, returning the new import's id
+    /// and initial per-feed status (TASK-38).
+    pub fn create_import(&self, opml: &[u8]) -> Result<Import> {
+        let resp = self
+            .http
+            .post(self.url("imports.json"))
+            .basic_auth(&self.email, Some(&self.password))
+            .header(CONTENT_TYPE, "text/xml")
+            .body(opml.to_vec())
+            .send()
+            .context("uploading the OPML import to Feedbin")?;
+        check_status(resp)?
+            .json::<Import>()
+            .context("parsing the import response")
+    }
+
+    /// Poll one import's status (`GET /imports/{id}.json`) for its `complete`
+    /// flag and per-feed results (TASK-38).
+    pub fn import_status(&self, id: i64) -> Result<Import> {
+        let resp = self
+            .get(&format!("imports/{id}.json"))
+            .send()
+            .context("requesting import status from Feedbin")?;
+        check_status(resp)?
+            .json::<Import>()
+            .context("parsing the import status response")
     }
 
     /// Mark entries read by removing them from Feedbin's unread set
@@ -577,6 +673,109 @@ mod tests {
         assert_eq!(titles.get(&7).map(String::as_str), Some("Rust Blog"));
         // A null-titled feed is omitted (renders as a placeholder later).
         assert!(!titles.contains_key(&9));
+    }
+
+    #[test]
+    fn subscriptions_parse_feed_and_site_urls_for_export() {
+        let mut server = mockito::Server::new();
+        let body = r#"[
+            {"id": 1, "feed_id": 7, "title": "Rust Blog", "feed_url": "https://blog.rust-lang.org/feed.xml", "site_url": "https://blog.rust-lang.org"},
+            {"id": 2, "feed_id": 9, "title": "No Site", "feed_url": "https://example.com/feed.xml", "site_url": null}
+        ]"#;
+        server
+            .mock("GET", "/v2/subscriptions.json")
+            .with_status(200)
+            .with_body(body)
+            .create();
+        let client = test_client(&server);
+        let subs = client.subscriptions().unwrap();
+        assert_eq!(subs.len(), 2);
+        assert_eq!(subs[0].feed_id, 7);
+        assert_eq!(
+            subs[0].feed_url.as_deref(),
+            Some("https://blog.rust-lang.org/feed.xml")
+        );
+        assert_eq!(
+            subs[0].site_url.as_deref(),
+            Some("https://blog.rust-lang.org")
+        );
+        assert_eq!(subs[1].site_url, None);
+    }
+
+    #[test]
+    fn create_import_posts_opml_as_text_xml() {
+        let mut server = mockito::Server::new();
+        let m = server
+            .mock("POST", "/v2/imports.json")
+            .match_header("content-type", "text/xml")
+            .match_body("<opml/>")
+            .with_status(200)
+            .with_body(
+                r#"{"id": 6, "complete": false, "import_items": [
+                {"title": "A", "feed_url": "https://a/feed", "status": "pending"}
+            ]}"#,
+            )
+            .create();
+        let client = test_client(&server);
+        let import = client.create_import(b"<opml/>").unwrap();
+        m.assert();
+        assert_eq!(import.id, 6);
+        assert!(!import.complete);
+        assert_eq!(import.import_items.len(), 1);
+    }
+
+    #[test]
+    fn import_status_reports_completion_and_tally() {
+        let mut server = mockito::Server::new();
+        server
+            .mock("GET", "/v2/imports/6.json")
+            .with_status(200)
+            .with_body(
+                r#"{"id": 6, "complete": true, "import_items": [
+                {"title": "A", "feed_url": "https://a/feed", "status": "complete"},
+                {"title": "B", "feed_url": "https://b/feed", "status": "complete"},
+                {"title": "C", "feed_url": "https://dead/feed", "status": "failed"}
+            ]}"#,
+            )
+            .create();
+        let client = test_client(&server);
+        let import = client.import_status(6).unwrap();
+        assert!(import.complete);
+        let tally = import.tally();
+        assert_eq!(
+            tally,
+            ImportTally {
+                complete: 2,
+                pending: 0,
+                failed: 1,
+                failed_urls: vec!["https://dead/feed".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn import_tally_counts_pending_and_unknown_statuses() {
+        // A still-processing import: pending items (and any status Feedbin might
+        // add later) fall into `pending`, with no failed URLs collected yet.
+        let import = Import {
+            id: 1,
+            complete: false,
+            import_items: vec![
+                ImportItem {
+                    feed_url: Some("https://a/feed".to_string()),
+                    status: "pending".to_string(),
+                },
+                ImportItem {
+                    feed_url: None,
+                    status: "queued".to_string(),
+                },
+            ],
+        };
+        let tally = import.tally();
+        assert_eq!(tally.complete, 0);
+        assert_eq!(tally.failed, 0);
+        assert_eq!(tally.pending, 2);
+        assert!(tally.failed_urls.is_empty());
     }
 
     #[test]

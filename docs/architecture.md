@@ -16,6 +16,7 @@ the build-out plan are in [`tui_research.md`](tui_research.md); CI is in [`ci.md
 | `ui` | Pure `format_unread()` — the plain-stdout entry list for `roses list`. |
 | `tui` | The full-screen ratatui app: state (`App`), event loop, rendering, async orchestration. |
 | `images` | Fetch + render images to Unicode half-block art (`▀`). |
+| `opml` | Pure OPML 2.0 generation for `roses export` (`to_opml()` + XML escaping); no parser — import uploads raw. |
 | `browser` | Resolve and launch the user's browser for an article URL. |
 | `store` | Blocking SQLite offline cache (feeds/entries/read state) for offline-first startup — see [`persistence.md`](persistence.md). |
 | `text` | `strip_control_chars()` — defuse terminal-escape injection in feed-derived display fields. |
@@ -31,6 +32,12 @@ cross-module use within the crate.
 - *(none)* → `run_tui()` → `connect()` then `tui::run(client)`.
 - `list` → `run_list()` → `connect()`, fetch newest ≤20 unread, print `ui::format_unread()`. Headless
   fallback (handy over SSH / for piping).
+- `export [FILE]` → `run_export()` → `connect()`, `client.subscriptions()`, map to `opml::OpmlFeed` (skip
+  feeds with no `feed_url`, sort by title), write `opml::to_opml()` to `FILE` or stdout. Status lines go to
+  **stderr** so a piped OPML document on stdout stays clean (TASK-38).
+- `import FILE` → `run_import()` → read the OPML, `connect()`, `client.create_import()` (POST raw), then
+  poll `client.import_status()` every 2 s (capped ~5 min) until `complete`, printing an `Import::tally()`
+  summary of complete/failed feeds (TASK-38).
 - `logout` → `config::logout()`.
 - `preview` → `tui::run_preview()` → renders the "all caught up" rose (the `Ready` + empty state) with
   **no login or network**, so the empty state can be eyeballed without marking everything read; quits on
@@ -114,9 +121,12 @@ tests point at a mockito server.
 | `authenticate()` | `GET /authentication.json` | 200 ⇒ ok; 401 ⇒ clear error. |
 | `unread_entry_ids()` | `GET /unread_entries.json` | `Vec<i64>` — source of truth for unread state. |
 | `entries(&[i64])` | `GET /entries.json?ids=…&mode=extended` | Hydrate `Entry`s, batched at 100 ids/request; `mode=extended` adds the images/enclosure/json_feed objects. |
-| `feed_titles()` | `GET /subscriptions.json` | `HashMap<feed_id, title>` (null titles dropped). |
+| `subscriptions()` | `GET /subscriptions.json` | `Vec<Subscription>` (feed id + title + feed/site URLs). |
+| `feed_titles()` | `GET /subscriptions.json` | `HashMap<feed_id, title>` (null titles dropped); a thin wrapper over `subscriptions()`. |
 | `mark_read(&[i64])` | `DELETE /unread_entries.json` | JSON body, batched at 1000; returns changed ids. |
 | `mark_unread(&[i64])` | `POST /unread_entries.json` | The undo for `mark_read`. |
+| `create_import(&[u8])` | `POST /imports.json` | Upload raw OPML (`Content-Type: text/xml`); returns an `Import` (TASK-38). |
+| `import_status(id)` | `GET /imports/{id}.json` | Poll one import's `complete` flag + per-feed `import_items` (TASK-38). |
 
 `check_status()` centralizes error mapping: success passes through; 401 → "rejected the stored
 credentials… run `roses logout`"; other non-2xx → `HTTP <status>: <body snippet>`. Write bodies are sent
@@ -351,6 +361,24 @@ placeholder is substituted, else the URL is appended. `run(&launch)` spawns a GU
 `status()`-waits a terminal one. In the TUI, `open_selected` resolves + runs; for a terminal browser,
 `suspend_and_run` leaves the alt-screen + raw mode, runs to completion, then restores and forces a
 redraw.
+
+## OPML import & export (`opml.rs`, TASK-38)
+
+Bulk feed migration in and out of Feedbin, as the headless `roses export`/`roses import` subcommands.
+
+**Export** is client-side: Feedbin has no OPML-export endpoint, so `run_export` fetches `subscriptions()`
+and `opml::to_opml()` serializes a flat OPML 2.0 document (feeds sorted by title; feeds with no `feed_url`
+skipped since an outline needs an `xmlUrl`; a missing title falls back to the URL). The `opml` module is a
+dependency-free hand-rolled writer with proper XML-attribute escaping (`xml_escape`) — the same "don't pull
+a crate for a handful of tags" call as the `tui` HTML→text helpers. Folder/tag grouping is intentionally
+out of scope (that's TASK-31); the export is flat for now.
+
+**Import** needs no OPML parser at all — Feedbin parses the upload server-side. `run_import` reads the file,
+`create_import()` POSTs the raw bytes, and because Feedbin processes imports asynchronously it then polls
+`import_status()` on a 2 s cadence (capped at ~5 min; the job keeps running server-side past the cap) until
+`complete`, then prints an `Import::tally()` summary — counts of complete/pending/failed plus the URLs that
+failed. `tally()` is a pure function over the `Import`, so the summary is unit-tested without the network,
+while the two client calls are covered by mockito.
 
 ## Config & credentials (`config.rs`)
 

@@ -33,10 +33,27 @@ nested `Option`s. `EntryImages { size_1: Option<ImageSize{ cdn_url }> }`,
 `Enclosure { enclosure_url, enclosure_type, itunes_duration }`, `JsonFeed { external_url }` — all fields
 `Option`, tolerant of absence.
 
-### `feedbin::Subscription` (private)
+### `feedbin::Subscription` (`pub`)
 
-Only `feed_id: i64` + `title: Option<String>` are deserialized; used solely to build the
-`feed_titles: HashMap<i64, String>` map (null-titled feeds are dropped and render as `(unknown feed)`).
+`feed_id: i64` + `title/feed_url/site_url: Option<String>` (Feedbin's `id`/`created_at` are dropped).
+`feed_titles()` builds the `feed_id → title` map from it (null-titled feeds dropped, rendering as
+`(unknown feed)`); the OPML export (TASK-38) uses `feed_url` (→ `xmlUrl`) and `site_url` (→ `htmlUrl`).
+
+### `feedbin::Import` / `ImportItem` / `ImportTally` (`pub`, TASK-38)
+
+The OPML-import job. `Import { id: i64, complete: bool, import_items: Vec<ImportItem> }` (`import_items`
+`#[serde(default)]` so a payload without it still parses); `ImportItem { feed_url: Option<String>, status:
+String }` (`status` is `"pending"`/`"complete"`/`"failed"` — kept as a string since Feedbin owns the
+vocabulary; Feedbin's `title` isn't modelled). `Import::tally()` is a pure fold to `ImportTally { complete,
+pending, failed: usize, failed_urls: Vec<String> }` (unknown statuses count as pending) — the data
+`roses import` prints, testable without the network.
+
+### `opml::OpmlFeed` (`pub`, TASK-38)
+
+`{ text: String, xml_url: String, html_url: Option<String> }` — one feed to serialize as an OPML
+`<outline>`. `opml::to_opml(title, &[OpmlFeed]) -> String` writes a flat, XML-escaped OPML 2.0 document;
+`run_export` maps `Subscription`s to these (skipping any without a `feed_url`, since an outline needs an
+`xmlUrl`; a blank title falls back to the URL) and sorts by `text`.
 
 ### Unread state
 
@@ -188,9 +205,11 @@ password) on every request** — no tokens. Full spec: <https://github.com/feedb
 | `GET /authentication.json` | validate login | 200 valid / 401 invalid. |
 | `GET /unread_entries.json` | unread ids | → `[i64, …]` (source of truth). |
 | `GET /entries.json?ids=…&mode=extended` | hydrate entries | ≤100 ids/request; `mode=extended` adds `images`/`enclosure`/`json_feed`; → `[Entry-shaped objects]`. |
-| `GET /subscriptions.json` | feed names | → objects with `feed_id` + `title`. |
+| `GET /subscriptions.json` | feed names + export | → objects with `feed_id`, `title`, `feed_url`, `site_url`. |
 | `DELETE /unread_entries.json` | mark read | body `{"unread_entries":[…]}`, ≤1000 ids; → changed ids. |
 | `POST /unread_entries.json` | mark unread (undo) | same shape as DELETE. |
+| `POST /imports.json` | import OPML | body = raw OPML, `Content-Type: text/xml`; → `Import` `{id, complete, import_items}` (TASK-38). |
+| `GET /imports/{id}.json` | poll import | → the same `Import` shape; `import_items[].status` ∈ `pending`/`complete`/`failed` (TASK-38). |
 
 Write requests send `Content-Type: application/json; charset=utf-8`. Constants: `MAX_IDS_PER_REQUEST = 100`
 (entries), `MAX_UNREAD_IDS_PER_REQUEST = 1000` (unread writes). Entry images are fetched separately, with
