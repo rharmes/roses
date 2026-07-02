@@ -63,6 +63,12 @@ browser_terminal = true
 # your place — an unchanged unread set is a cheap conditional request. Values
 # below 60 are clamped up to 60s to stay polite to Feedbin.
 refresh_interval_secs = 300
+
+# Accent color for the UI chrome — the focused column, the selection bar, the
+# reader title, the footer keys, and the help overlay. A hex string: #rrggbb or
+# the shorthand #rgb (the leading # is optional). Omit or set an invalid value
+# to keep the default rose. The "all caught up" rose art always stays rose.
+highlight_color = "#e06c9a"
 ```
 
 ## Keyboard shortcuts

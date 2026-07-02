@@ -1,11 +1,11 @@
 ---
 id: TASK-46
 title: Mute the focus/selection accent while the help overlay is open
-status: In Progress
+status: Done
 assignee:
   - '@ross'
 created_date: '2026-07-01 22:42'
-updated_date: '2026-07-01 22:52'
+updated_date: '2026-07-01 23:00'
 labels:
   - feature
   - ux
@@ -34,3 +34,9 @@ When the ? help overlay (TASK-32) is open, the three-column UI behind it still d
 <!-- SECTION:NOTES:BEGIN -->
 Implemented on branch task-46-mute-accent-under-help. Added theme::MUTED (grey Rgb 0x808080) and App::accent() -> Color returning MUTED when show_help else ROSE; column_block (focused border/title) and highlight (selection bar) now resolve their color via self.accent(). Display-only — focus/selection state untouched. Scoped to those two per AC #1; the overlay's own border/title (draw_help_overlay uses theme::ROSE directly), the footer keys, and the reader title stay rose. Reader title deliberately excluded: it lives in the memoized reader_text, so muting it would require keying the reader cache on show_help — out of scope. New TestBackend test asserts border+selection are rose (closed) -> grey + reversed (open, overlay title still rose) -> rose again (closed). 122 tests pass, fmt+clippy clean, 5x stable. Docs: architecture Help-overlay subsection notes the muting + scope.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Shipped as PR #30 (merged to main). While the ? help overlay is open, the focus/selection accent recedes to grey so the overlay draws the eye. Added theme::MUTED + App::accent() (ROSE normally, MUTED when show_help); column_block (focused border/title) and highlight (selection bar) resolve through it. Display-only — focus/selection state untouched. Scoped to those two per AC #1; overlay border/title, footer keys, and reader title stay rose (reader title excluded as it lives in the memoized reader_text). TestBackend test asserts rose(closed)->grey+reversed(open, overlay title still rose)->rose(closed). 122 tests pass, fmt+clippy clean, 5x stable; docs updated in-commit.
+<!-- SECTION:FINAL_SUMMARY:END -->

@@ -139,6 +139,7 @@ email = "reader@example.com"
 browser = "w3m %s"          # command template: %s / {url} placeholder, else URL appended
 browser_terminal = true     # roses suspends/restores the TUI around a terminal browser
 refresh_interval_secs = 300 # background auto-refresh cadence; omit/0 = off (TASK-37)
+highlight_color = "#e06c9a" # UI accent override; hex #rrggbb / #rgb; invalid/unset = rose (TASK-45)
 ```
 
 | Field | Type | Notes |
@@ -147,6 +148,7 @@ refresh_interval_secs = 300 # background auto-refresh cadence; omit/0 = off (TAS
 | `browser` | `Option<String>` | Browser command template. |
 | `browser_terminal` | `Option<bool>` | Whether `browser` runs in the terminal (default false). |
 | `refresh_interval_secs` | `Option<u64>` | Background auto-refresh interval in seconds; `None`/`0` disables it (default). Sub-60 s values are clamped up to a 60 s politeness floor (`MIN_REFRESH_SECS`) by `load_refresh_interval()` (TASK-37). |
+| `highlight_color` | `Option<String>` | UI accent color as a hex string (`#rrggbb`/`rrggbb` or 3-digit `#rgb`). Resolved to a `Color` by `theme::parse_hex`; unset or unparseable falls back to `theme::ROSE`. Recolors chrome only — the "all caught up" rose mascot keeps its own palette (TASK-45). |
 
 **No password is ever written here** (a unit test asserts the serialized settings never contain
 "password"). The `config.toml` filename is `.gitignore`d defensively.
