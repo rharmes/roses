@@ -77,6 +77,25 @@ highlight_color = "#e06c9a"
 load_remote_images = true
 ```
 
+## Import & export
+
+Move your subscriptions in and out of Feedbin as [OPML](https://opml.org):
+
+```sh
+# Export your current subscriptions to an OPML file (or stdout if no path).
+roses export feeds.opml
+roses export > feeds.opml
+
+# Import subscriptions from an OPML file. roses uploads it to Feedbin, waits for
+# the import to finish, and prints how many feeds succeeded or failed.
+roses import feeds.opml
+```
+
+Feedbin has no OPML *export* endpoint, so `roses export` builds the OPML itself
+from your subscription list (a flat list, sorted by title). Import goes through
+Feedbin's asynchronous import API — roses polls it to completion and reports a
+per-feed tally.
+
 ## Keyboard shortcuts
 
 | Key(s) | Action |

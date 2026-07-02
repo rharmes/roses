@@ -1,11 +1,11 @@
 ---
 id: TASK-39
 title: 'Privacy: option to disable remote image loading'
-status: In Progress
+status: Done
 assignee:
   - '@ross'
 created_date: '2026-07-01 14:38'
-updated_date: '2026-07-02 16:59'
+updated_date: '2026-07-02 17:15'
 labels:
   - feature
   - privacy
@@ -43,3 +43,9 @@ roses auto-fetches inline and lead images from arbitrary third-party hosts on lo
 <!-- SECTION:NOTES:BEGIN -->
 Implemented on branch task-39-disable-remote-images. Config-only (no runtime toggle, per interview). Settings.load_remote_images: Option<bool> + config::load_remote_images() -> bool (default true). App.load_remote_images (default true), set from UiConfig in run_loop; run() resolves via config::load_remote_images().unwrap_or(true). refill_image_queue() — the sole image-enqueue choke point — early-returns when off, so no image HTTP request is issued and image_urls stays empty (no 'N of M' indicator). reader_text/push_image take a remote_images: bool; when off push_image renders dim '[remote images off: <url>]' for both inline and lead images, short-circuiting the cache lookup. Flag is constant per process (like base_accent), so not in the reader_cache key. Tests: refill enqueues nothing + image_progress None when off (AC#3), reader shows the placeholder not 'loading', config round-trip + default-true. 130 pass, fmt+clippy clean, 5x stable. Docs in-commit: README config block, data-model Settings table+example, architecture Image pre-fetch section + config list.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Shipped as PR #32 (merged to main). config.toml load_remote_images (bool, default true) is a privacy switch: false blocks every third-party image fetch — no image HTTP request is issued, so the reader's IP never reaches trackers — and the reader shows a dim '[remote images off: <url>]' placeholder. Gated at the single image-enqueue choke point: refill_image_queue() early-returns when off (nothing queued, image_urls empty so no 'N of M' indicator), and push_image() short-circuits ahead of the cache for inline + lead images. App.load_remote_images resolved once at startup (like base_accent) via config::load_remote_images(), threaded through UiConfig; constant per process so not in the reader_cache key. Config-only, no runtime toggle (per interview). Tests: refill enqueues nothing + image_progress None when off (AC#3), reader renders placeholder not 'loading', config round-trip + default-true. 130 pass, fmt+clippy clean, 5x stable; docs updated in-commit (README, data-model, architecture).
+<!-- SECTION:FINAL_SUMMARY:END -->
