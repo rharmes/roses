@@ -5,5 +5,8 @@
 # Rust build artifacts
 /target
 
+# Byte-compiled output from docs/make-icon.py
+__pycache__/
+
 # Defensive: the real config lives in ~/.config/roses, never the repo
 config.toml
