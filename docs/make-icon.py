@@ -50,12 +50,13 @@ MENLO_ADVANCE = 0.6021
 # A terminal cell is about 1:2; squaring it up a little lets the bloom read as
 # round and fill more of a square canvas.
 CELL_ASPECT = 1.35
-# Art size and placement as fractions of the canvas: a small rose in the upper
-# right. Its top-right point sits at (0.900, 0.081); the bloom grows down and to
-# the left from there, so the stem now dips just past the horizontal midline and
-# the widest row just past the vertical one.
-ART_FRAC = 0.432
-CENTER = (0.684, 0.3078)
+# Art size and placement as fractions of the canvas: the rose centred and large.
+# CENTER positions the character-cell box, which is not what the eye centres on —
+# the stem's '|' hangs below the last row's cell — so the y is nudged up until the
+# *ink* is centred. That lands the drawn rose at 80% of the icon's height, leaving
+# a 10% border top and bottom (14% at the sides, since the art is taller than wide).
+ART_FRAC = 0.7891
+CENTER = (0.5010, 0.4727)
 
 # Apple's continuous-corner radius, as a fraction of the icon's side.
 CORNER_FRAC = 0.2237
